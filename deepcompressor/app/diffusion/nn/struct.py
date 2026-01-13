@@ -720,21 +720,16 @@ class DiffusionTransformerBlockStruct(TransformerBlockStruct, DiffusionBlockStru
             add_ffn, add_ffn_rname = module.ff_context, "ff_context"
         elif isinstance(module, ZImageTransformerBlock):
             # Z-Image Turbo transformer block
-            # Has: attention, feed_forward, attention_norm1/2, ffn_norm1/2, adaLN_modulation
+            # Uses self-attention only (no cross-attention), so pre_attn_add_norms must be empty
             parallel = False
             norm_type = add_norm_type = "rms_norm"
             pre_attn_norms, pre_attn_norm_rnames = [module.attention_norm1], ["attention_norm1"]
             attns, attn_rnames = [module.attention], ["attention"]
+            # Self-attention only - no additional norms
             pre_attn_add_norms, pre_attn_add_norm_rnames = [], []
-            if hasattr(module, "attention_norm2") and module.attention_norm2 is not None:
-                pre_attn_add_norms.append(module.attention_norm2)
-                pre_attn_add_norm_rnames.append("attention_norm2")
             pre_ffn_norm, pre_ffn_norm_rname = module.ffn_norm1, "ffn_norm1"
             ffn, ffn_rname = module.feed_forward, "feed_forward"
-            if hasattr(module, "ffn_norm2") and module.ffn_norm2 is not None:
-                pre_add_ffn_norm, pre_add_ffn_norm_rname = module.ffn_norm2, "ffn_norm2"
-            else:
-                pre_add_ffn_norm, pre_add_ffn_norm_rname = None, ""
+            pre_add_ffn_norm, pre_add_ffn_norm_rname = None, ""
             add_ffn, add_ffn_rname = None, ""
         else:
             raise NotImplementedError(f"Unsupported module type: {type(module)}")
