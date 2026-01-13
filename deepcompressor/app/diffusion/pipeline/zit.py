@@ -194,11 +194,7 @@ def build_zit_pipeline(
             latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
         else:
             if latents.shape != shape:
-                # If latents are 4 channel (from VAE encode?), we might need to pixel shuffle?
-                # But here we just want to ensure we don't crash.
                 print(f"DEBUG: latents mismatch shape {latents.shape} vs {shape}")
-                # If using latents from VAE encode (4ch), we cannot just use them.
-                # We need to adapt. But for now let's hope calibration uses text prompts.
                 pass
             latents = latents.to(device)
             
@@ -207,5 +203,34 @@ def build_zit_pipeline(
 
     pipe.prepare_latents = types.MethodType(custom_prepare_latents, pipe)
     
-    print("ZImagePipeline built successfully with T5 encoder and monkeypatched prepare_latents")
+    # === CRITICAL FIX ===
+    # Wrap embedder to fix shape mismatch (Batch*16, 1) -> (Batch, 16)
+    class ZITPatchEmbedWrapper(torch.nn.Module):
+        def __init__(self, original_embedder):
+            super().__init__()
+            self.original_embedder = original_embedder
+            
+        def forward(self, x):
+            # Detect flattened input: [Batch*16, 1, H, W] -> needs [Batch, 16, H, W]
+            if x.dim() == 4 and x.shape[1] == 1 and x.shape[0] % 16 == 0:
+                print(f"DEBUG: ZITPatchEmbedWrapper caught flattened input {x.shape}")
+                batch_size = x.shape[0] // 16
+                x = x.view(batch_size, 16, x.shape[2], x.shape[3])
+                print(f"DEBUG: Restored to {x.shape}")
+            return self.original_embedder(x)
+        
+        def __getattr__(self, name):
+            if name in ["_parameters", "_buffers", "_modules"]:
+                return super().__getattr__(name)
+            return getattr(self.original_embedder, name)
+
+    if hasattr(pipe.transformer, "all_x_embedder"):
+        print("DEBUG: Applying ZITPatchEmbedWrapper to transformer.all_x_embedder")
+        for key in pipe.transformer.all_x_embedder.keys():
+            original = pipe.transformer.all_x_embedder[key]
+            # Ensure we don't double-wrap
+            if not isinstance(original, ZITPatchEmbedWrapper):
+                pipe.transformer.all_x_embedder[key] = ZITPatchEmbedWrapper(original)
+
+    print("ZImagePipeline built successfully with T5 encoder, monkeypatched prepare_latents, and PatchEmbedWrapper")
     return pipe
