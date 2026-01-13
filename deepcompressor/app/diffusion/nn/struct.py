@@ -37,6 +37,7 @@ from diffusers.models.transformers.transformer_flux import (
 )
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel, ZImageTransformerBlock
+from diffusers.models.transformers.transformer_z_image import FeedForward as ZImageFeedForward
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.models.unets.unet_2d_blocks import (
     CrossAttnDownBlock2D,
@@ -1981,7 +1982,7 @@ class FluxStruct(DiTStruct):
 DiffusionAttentionStruct.register_factory(Attention, DiffusionAttentionStruct._default_construct)
 
 DiffusionFeedForwardStruct.register_factory(
-    (FeedForward, FluxSingleTransformerBlock, GLUMBConv), DiffusionFeedForwardStruct._default_construct
+    (FeedForward, FluxSingleTransformerBlock, GLUMBConv, ZImageFeedForward), DiffusionFeedForwardStruct._default_construct
 )
 
 DiffusionTransformerBlockStruct.register_factory(DIT_BLOCK_CLS, DiffusionTransformerBlockStruct._default_construct)
