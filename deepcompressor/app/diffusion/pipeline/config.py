@@ -126,6 +126,7 @@ class DiffusionPipelineConfig:
         
         # ZIT uses ZImagePipeline with full T5 encoder
         if self.name in ("zimage", "z-image-turbo"):
+            print(f"DEBUG: config.py detected zimage pipeline name='{self.name}', calling build_zit_pipeline")
             from .zit import build_zit_pipeline
             return build_zit_pipeline(
                 transformer_path=self.transformer_path,
