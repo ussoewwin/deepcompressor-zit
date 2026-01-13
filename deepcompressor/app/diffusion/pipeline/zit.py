@@ -100,6 +100,7 @@ def load_zit_transformer(
     # Default config matches Z-Image Turbo: 30 layers, 24 heads, etc.
     with torch.device("meta"):
         model = ZImageTransformer2DModel(in_channels=16)
+        print(f"DEBUG: ZImageTransformer2DModel initialized with in_channels={model.config.in_channels}")
     
     # Move model to real device and load weights
     model = model.to_empty(device=device)
@@ -148,8 +149,8 @@ def build_zit_pipeline(
             hf_model_path,
             transformer=transformer,
             torch_dtype=dtype,
-            low_cpu_mem_usage=False,
         )
+        print(f"DEBUG: ZImagePipeline built from local. Transformer in_channels={pipe.transformer.config.in_channels}")
     else:
         # Load entire pipeline directly from HuggingFace
         print("No transformer_path provided, loading from HuggingFace directly...")
