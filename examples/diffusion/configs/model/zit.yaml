@@ -3,8 +3,8 @@ pipeline:
   name: zimage
   path: Tongyi-MAI/Z-Image-Turbo
   # Windows: D:/nu/z_image_turbo_bf16.safetensors
-  # Vast.ai/Linux: models/z-image-turbo/transformer (or provide full path to safetensors)
-  transformer_path: null  # Will use HuggingFace model directly if null
+  # Vast.ai/Linux: /root/models/z_image_turbo_bf16.safetensors
+  transformer_path: /root/models/z_image_turbo_bf16.safetensors
   dtype: torch.bfloat16
 eval:
   num_steps: 4
