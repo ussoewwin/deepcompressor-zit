@@ -519,6 +519,13 @@ class DiffusionFeedForwardStruct(FeedForwardStruct):
             up_proj, up_proj_rname = module.conv_inverted, "conv_inverted"
             down_proj, down_proj_rname = module.conv_point, "conv_point"
             act_type = "silu_conv_silu_glu"
+        elif isinstance(module, ZImageFeedForward):
+            # Z-Image Turbo FeedForward: has w1, w2, w3 (SwiGLU style)
+            # w1 and w3 are gate/up, w2 is down projection
+            ffn = module
+            up_proj, up_proj_rname = module.w1, "w1"
+            down_proj, down_proj_rname = module.w2, "w2"
+            act_type = "swiglu"
         else:
             raise NotImplementedError(f"Unsupported module type: {type(module)}")
         config = FeedForwardConfigStruct(
