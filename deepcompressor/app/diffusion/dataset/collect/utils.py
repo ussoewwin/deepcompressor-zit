@@ -62,7 +62,10 @@ class CollectHook:
         elif isinstance(module, ZImageTransformer2DModel):
             # ZIT uses 'x' as the main input (list of latent tensors)
             x = input_kwargs.pop("x")
-            if isinstance(x, list) and len(x) > 0:
+            print(f"DEBUG: CollectHook ZIT input x type: {type(x)}")
+            if hasattr(x, "shape"):
+                print(f"DEBUG: CollectHook ZIT input x shape: {x.shape}")
+            elif isinstance(x, list) and len(x) > 0:
                  print(f"DEBUG: CollectHook ZIT input x[0] shape: {x[0].shape}, dtype={x[0].dtype}")
             new_args.append(x)
         else:
