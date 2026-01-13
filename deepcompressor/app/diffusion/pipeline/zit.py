@@ -220,9 +220,10 @@ def build_zit_pipeline(
             return self.original_embedder(x)
         
         def __getattr__(self, name):
-            if name in ["_parameters", "_buffers", "_modules"]:
+            try:
                 return super().__getattr__(name)
-            return getattr(self.original_embedder, name)
+            except AttributeError:
+                return getattr(self.original_embedder, name)
 
     if hasattr(pipe.transformer, "all_x_embedder"):
         print("DEBUG: Applying ZITPatchEmbedWrapper to transformer.all_x_embedder")
