@@ -99,7 +99,7 @@ def load_zit_transformer(
     # Create model with default config (on meta device first for efficiency)
     # Default config matches Z-Image Turbo: 30 layers, 24 heads, etc.
     with torch.device("meta"):
-        model = ZImageTransformer2DModel()
+        model = ZImageTransformer2DModel(in_channels=16, patch_size=2)
     
     # Move model to real device and load weights
     model = model.to_empty(device=device)
