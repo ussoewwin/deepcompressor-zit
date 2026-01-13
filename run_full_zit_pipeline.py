@@ -43,7 +43,7 @@ env['XFORMERS_DISABLED'] = '1'
 env['PYTHONUNBUFFERED'] = '1'
 
 calib_cmd = [
-    'python3', '-u', '-m', 'deepcompressor.app.diffusion.dataset.collect',
+    'python3', '-u', '-m', 'deepcompressor.app.diffusion.dataset.collect.calib',
     'examples/diffusion/configs/model/zit.yaml',
     'examples/diffusion/configs/collect/zit.yaml',
 ]
