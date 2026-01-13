@@ -211,12 +211,14 @@ def build_zit_pipeline(
             self.original_embedder = original_embedder
             
         def forward(self, x):
+            # Unconditional debug print
+            print(f"DEBUG: ZITPatchEmbedWrapper forward input: {x.shape}")
             # Detect flattened input: [Batch*16, 1, H, W] -> needs [Batch, 16, H, W]
-            if x.dim() == 4 and x.shape[1] == 1 and x.shape[0] % 16 == 0:
-                print(f"DEBUG: ZITPatchEmbedWrapper caught flattened input {x.shape}")
-                batch_size = x.shape[0] // 16
-                x = x.view(batch_size, 16, x.shape[2], x.shape[3])
-                print(f"DEBUG: Restored to {x.shape}")
+            if x.dim() == 4 and x.shape[1] == 1:
+                if x.shape[0] % 16 == 0:
+                     print(f"DEBUG: Reshaping 1-channel flattened input to 16-channel")
+                     batch_size = x.shape[0] // 16
+                     x = x.view(batch_size, 16, x.shape[2], x.shape[3])
             return self.original_embedder(x)
         
         def __getattr__(self, name):
