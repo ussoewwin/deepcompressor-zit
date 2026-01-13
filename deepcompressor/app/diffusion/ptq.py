@@ -557,17 +557,10 @@ def main(config: DiffusionPtqRunConfig, logging_level: int = tools.logging.DEBUG
     logger.info("=== Building Pipeline ===")
     tools.logging.Formatter.indent_inc()
     pipeline = config.pipeline.build()
-    
-    # Load transformer weights if specified
-    if hasattr(config.pipeline, "transformer_path") and config.pipeline.transformer_path:
-        logger.info(f"* Loading transformer weights from {config.pipeline.transformer_path}")
-        transformer = getattr(pipeline, "transformer", None)
-        if transformer is not None:
-            state_dict = _load_safetensors_state_dict(config.pipeline.transformer_path)
-            transformer.load_state_dict(state_dict, strict=False)
-            del state_dict
-            gc.collect()
-            torch.cuda.empty_cache()
+    # NOTE: For ZIT models, transformer loading is already handled by build_zit_pipeline
+    # with proper DiffSynth->Diffusers key conversion. Do NOT reload here as it would
+    # overwrite with unconverted keys and cause shape mismatch errors.
+    # The code below is only for non-ZIT models that need manual transformer loading.
     
     model = DiffusionModelStruct.construct(pipeline)
     tools.logging.Formatter.indent_dec()
