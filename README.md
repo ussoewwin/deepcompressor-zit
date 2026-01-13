@@ -1,3 +1,8 @@
+# DeepCompressor (ZIT Edition)
+
+> [!IMPORTANT]
+> This repository is a fork of [nunchaku-ai/deepcompressor](https://github.com/nunchaku-ai/deepcompressor), specifically adapted for Z-Image Turbo (ZIT) quantization.
+
 <p align="center">
 <img src="assets/deepcompressor.png" alt="DeepCompressor Logo" width="450">
 </p>
