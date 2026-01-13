@@ -2,6 +2,8 @@
 """Output configuration."""
 
 import os
+import time
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime as DateTime
 
@@ -88,10 +90,36 @@ class OutputConfig:
 
     def unlock(self, error: bool = False) -> None:
         """Unlock the running (job) directory."""
-        job_dirpath = os.path.join(self.running_dirpath, self.error_job_dirname if error else self.job_dirname)
-        os.rename(self.running_job_dirpath, job_dirpath)
-        if not self.is_locked_by_others():
-            os.rename(self.running_dirpath, self.error_dirpath if error else self.dirpath)
+        try:
+            job_dirpath = os.path.join(self.running_dirpath, self.error_job_dirname if error else self.job_dirname)
+            # On Windows, AV/Indexer/Explorer may temporarily lock files, causing directory rename to fail.
+            # Retry sufficiently (max ~30 seconds), and if it still fails, leave RUNNING without raising exception.
+            def _move_dir_with_retry(src: str, dst: str, *, timeout_s: float = 30.0) -> bool:
+                deadline = time.time() + timeout_s
+                delay = 0.05
+                while True:
+                    try:
+                        # shutil.move is equivalent to rename on the same drive
+                        shutil.move(src, dst)
+                        return True
+                    except (PermissionError, OSError):
+                        if time.time() >= deadline:
+                            return False
+                        time.sleep(delay)
+                        delay = min(delay * 1.5, 0.5)
+
+            moved_job = _move_dir_with_retry(self.running_job_dirpath, job_dirpath, timeout_s=30.0)
+            if not moved_job:
+                # Don't fail on "last rename only". Leave RUNNING and exit.
+                return
+
+            if not self.is_locked_by_others():
+                _move_dir_with_retry(
+                    self.running_dirpath, self.error_dirpath if error else self.dirpath, timeout_s=30.0
+                )
+        except Exception:
+            # Never raise exception here either (Windows lock workaround)
+            return
 
     def is_locked_by_others(self) -> bool:
         """Check if the running directory is locked by others."""

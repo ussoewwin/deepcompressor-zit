@@ -83,6 +83,8 @@ class DiffusionPipelineConfig:
 
     name: str
     path: str = ""
+    unet_path: str = ""
+    transformer_path: str = ""
     dtype: torch.dtype = field(
         default_factory=lambda s=torch.float32: eval_dtype(s, with_quant_dtype=False, with_none=False)
     )
@@ -121,6 +123,17 @@ class DiffusionPipelineConfig:
             dtype = self.dtype
         if device is None:
             device = self.device
+        
+        # ZIT uses ZImagePipeline with full T5 encoder
+        if self.name in ("zimage", "z-image-turbo"):
+            from .zit import build_zit_pipeline
+            return build_zit_pipeline(
+                transformer_path=self.transformer_path,
+                hf_model_path=self.path if self.path else "Tongyi-MAI/Z-Image-Turbo",
+                dtype=dtype,
+                device=device,
+            )
+        
         _factory = self._pipeline_factories.get(self.name, self._default_build)
         return _factory(
             name=self.name, path=self.path, dtype=dtype, device=device, shift_activations=self.shift_activations
@@ -344,6 +357,8 @@ class DiffusionPipelineConfig:
                 path = "black-forest-labs/FLUX.1-Fill-dev"
             elif name == "flux.1-schnell":
                 path = "black-forest-labs/FLUX.1-schnell"
+            elif name == "zimage" or name == "z-image-turbo":
+                path = "Z-Turbo/z-image-turbo"
             else:
                 raise ValueError(f"Path for {name} is not specified.")
         if name in ["flux.1-canny-dev", "flux.1-depth-dev"]:

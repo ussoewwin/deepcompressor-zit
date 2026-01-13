@@ -31,7 +31,15 @@ def collect(config: DiffusionPtqRunConfig, dataset: datasets.Dataset):
     caches = []
 
     pipeline = config.pipeline.build()
-    model = pipeline.unet if hasattr(pipeline, "unet") else pipeline.transformer
+    
+    # Get model - ZIT uses 'transformer' attribute directly
+    if hasattr(pipeline, "unet"):
+        model = pipeline.unet
+    elif hasattr(pipeline, "transformer"):
+        model = pipeline.transformer
+    else:
+        raise ValueError("Pipeline has neither 'unet' nor 'transformer' attribute")
+    
     assert isinstance(model, nn.Module)
     model.register_forward_hook(CollectHook(caches=caches), with_kwargs=True)
 
@@ -69,7 +77,7 @@ def collect(config: DiffusionPtqRunConfig, dataset: datasets.Dataset):
             else:
                 pipeline_kwargs["control_image"] = controls
 
-        result_images = pipeline(prompts, generator=generators, **pipeline_kwargs).images
+        result_images = pipeline(prompt=prompts, generator=generators, **pipeline_kwargs).images
         num_guidances = (len(caches) // batch_size) // config.eval.num_steps
         num_steps = len(caches) // (batch_size * num_guidances)
         assert (

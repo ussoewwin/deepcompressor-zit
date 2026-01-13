@@ -1,0 +1,5 @@
+collect:
+  root: datasets
+  dataset_name: zit_calib
+  data_path: prompts/zit_calib.yaml
+  num_samples: 128

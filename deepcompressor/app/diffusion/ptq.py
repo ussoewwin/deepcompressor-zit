@@ -1,14 +1,20 @@
+"""Z-Image Turbo Nunchaku Export for DeepCompressor.
+
+This module provides export functionality for Z-Image Turbo models quantized with SVDQuant.
+Based on the official svdq-fp4_r128-z-image-turbo.safetensors structure.
+"""
 import gc
 import json
 import os
 import pprint
 import traceback
 
+import safetensors
+import safetensors.torch
 import torch
 from diffusers import DiffusionPipeline
 
-from deepcompressor.app.llm.nn.patch import patch_attention, patch_gemma_rms_norm
-from deepcompressor.app.llm.ptq import ptq as llm_ptq
+from deepcompressor.backend.nunchaku.convert import convert_to_nunchaku_w4x4y16_linear_state_dict
 from deepcompressor.utils import tools
 
 from .config import DiffusionPtqCacheConfig, DiffusionPtqRunConfig, DiffusionQuantCacheConfig, DiffusionQuantConfig
@@ -24,7 +30,362 @@ from .quant import (
 __all__ = ["ptq"]
 
 
-def ptq(  # noqa: C901
+def _load_safetensors_state_dict(path: str) -> dict[str, torch.Tensor]:
+    state_dict: dict[str, torch.Tensor] = {}
+    with safetensors.safe_open(path, framework="pt", device="cpu") as f:
+        for k in f.keys():
+            state_dict[k] = f.get_tensor(k)
+    return state_dict
+
+
+def _detect_precision(wgts_dtype) -> str:
+    """Detect precision from weight quantization dtype."""
+    if wgts_dtype is None:
+        return "nvfp4"
+    dtype_str = str(wgts_dtype).lower()
+    if "sfp4" in dtype_str or "fp4" in dtype_str or "nvfp4" in dtype_str:
+        return "nvfp4"
+    elif "sint4" in dtype_str or "int4" in dtype_str:
+        return "int4"
+    return "nvfp4"
+
+
+def _zit_export_build_metadata(*, transformer, rank: int, precision: str) -> dict[str, str]:
+    """Build metadata for Z-Image Turbo Nunchaku export."""
+    # Get transformer config
+    transformer_cfg = getattr(transformer, "config", None)
+    if hasattr(transformer_cfg, "to_dict"):
+        transformer_cfg = transformer_cfg.to_dict()
+    if not isinstance(transformer_cfg, dict):
+        # Fallback default config for Z-Image Turbo
+        transformer_cfg = {
+            "_class_name": "ZImageTransformer2DModel",
+            "_diffusers_version": "0.36.0.dev0",
+            "all_f_patch_size": [1],
+            "all_patch_size": [2],
+            "axes_dims": [32, 48, 48],
+            "axes_lens": [1536, 512, 512],
+            "cap_feat_dim": 2560,
+            "dim": 3840,
+            "in_channels": 16,
+            "n_heads": 30,
+            "n_kv_heads": 30,
+            "n_layers": 30,
+            "n_refiner_layers": 2,
+            "norm_eps": 1e-05,
+            "qk_norm": True,
+            "rope_theta": 256.0,
+            "t_scale": 1000.0,
+        }
+    
+    # Build quantization config matching official format
+    quant_config = {
+        "method": "svdquant",
+        "weight": {"dtype": "fp4_e2m1_all", "scale_dtype": [None, "fp8_e4m3_nan"], "group_size": 16},
+        "activation": {"dtype": "fp4_e2m1_all", "scale_dtype": "fp8_e4m3_nan", "group_size": 16},
+        "rank": int(rank),
+        "skip_refiners": False,
+    }
+    
+    return {
+        "model_class": "NunchakuZImageTransformer2DModel",
+        "config": json.dumps(transformer_cfg),
+        "quantization_config": json.dumps(quant_config),
+        "comfy_config": "{}",
+    }
+
+
+def _process_zit_linear(
+    *,
+    module_name: str,
+    orig_state: dict[str, torch.Tensor],
+    dequant_state: dict[str, torch.Tensor],
+    scale_state: dict[str, torch.Tensor],
+    branch_state: dict[str, dict[str, torch.Tensor]] | None,
+    out_state: dict[str, torch.Tensor],
+    rank: int,
+    torch_dtype: torch.dtype,
+    float_point: bool,
+    is_qkv_fused: bool = False,
+    qkv_modules: list[str] | None = None,
+) -> None:
+    """Process a single linear layer for Z-Image Turbo export."""
+    
+    def _get_scale(name: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+        s0 = scale_state.get(f"{name}.weight.scale.0", None)
+        if s0 is None:
+            return None, None
+        if not isinstance(s0, torch.Tensor):
+            s0 = torch.tensor([float(s0)], dtype=torch_dtype, device="cpu")
+        s1 = scale_state.get(f"{name}.weight.scale.1", None)
+        if s1 is not None and not isinstance(s1, torch.Tensor):
+            s1 = torch.tensor([float(s1)], dtype=torch_dtype, device="cpu")
+        return s0, s1
+    
+    def _get_branch(name: str) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not branch_state:
+            return None
+        b = branch_state.get(name, None)
+        if not b or "a.weight" not in b or "b.weight" not in b:
+            return None
+        return b["a.weight"], b["b.weight"]
+    
+    def _get_smooth(name: str) -> torch.Tensor | None:
+        # Check for smooth factor in dequant state
+        smooth_key = f"{name}.smooth_factor"
+        if smooth_key in dequant_state:
+            return dequant_state[smooth_key]
+        return None
+    
+    if is_qkv_fused and qkv_modules:
+        # Fuse Q, K, V into single to_qkv
+        q_name, k_name, v_name = qkv_modules
+        q_w = orig_state.get(f"{q_name}.weight")
+        k_w = orig_state.get(f"{k_name}.weight")
+        v_w = orig_state.get(f"{v_name}.weight")
+        
+        if q_w is None or k_w is None or v_w is None:
+            return
+        
+        fused_w = torch.cat([q_w, k_w, v_w], dim=0)
+        
+        # Get dequant weights for residual
+        dq_q_w = dequant_state.get(f"{q_name}.weight")
+        dq_k_w = dequant_state.get(f"{k_name}.weight")
+        dq_v_w = dequant_state.get(f"{v_name}.weight")
+        
+        if dq_q_w is not None and dq_k_w is not None and dq_v_w is not None:
+            dq_fused_w = torch.cat([dq_q_w, dq_k_w, dq_v_w], dim=0)
+            residual = (fused_w.to(dtype=torch.float32) - dq_fused_w.to(dtype=torch.float32)).to(dtype=torch.float16)
+            u, s, vh = torch.linalg.svd(residual.double())
+            b_w = (u[:, :rank] * s[:rank]).to(dtype=torch_dtype, device="cpu")
+            a_w = vh[:rank].to(dtype=torch_dtype, device="cpu")
+            lora = (a_w, b_w)
+        else:
+            lora = _get_branch(q_name)
+        
+        # Fuse scales
+        q_s0, q_s1 = _get_scale(q_name)
+        k_s0, k_s1 = _get_scale(k_name)
+        v_s0, v_s1 = _get_scale(v_name)
+        
+        if q_s0 is not None and k_s0 is not None and v_s0 is not None:
+            if q_s0.numel() == 1:
+                fused_s0 = torch.cat([
+                    q_s0.view(-1).expand(q_w.shape[0]).reshape(q_w.shape[0], 1, 1, 1),
+                    k_s0.view(-1).expand(k_w.shape[0]).reshape(k_w.shape[0], 1, 1, 1),
+                    v_s0.view(-1).expand(v_w.shape[0]).reshape(v_w.shape[0], 1, 1, 1),
+                ], dim=0)
+            else:
+                fused_s0 = torch.cat([q_s0, k_s0, v_s0], dim=0)
+        else:
+            return
+        
+        fused_s1 = None
+        if q_s1 is not None and k_s1 is not None and v_s1 is not None:
+            if q_s1.numel() == 1:
+                fused_s1 = torch.cat([
+                    q_s1.view(-1).expand(q_w.shape[0]).reshape(q_w.shape[0], 1, 1, 1),
+                    k_s1.view(-1).expand(k_w.shape[0]).reshape(k_w.shape[0], 1, 1, 1),
+                    v_s1.view(-1).expand(v_w.shape[0]).reshape(v_w.shape[0], 1, 1, 1),
+                ], dim=0)
+            else:
+                fused_s1 = torch.cat([q_s1, k_s1, v_s1], dim=0)
+        
+        smooth = _get_smooth(q_name)
+        
+        converted = convert_to_nunchaku_w4x4y16_linear_state_dict(
+            weight=fused_w.to(dtype=torch_dtype, device="cpu"),
+            scale=fused_s0.to(device="cpu"),
+            bias=None,
+            smooth=smooth.to(device="cpu") if smooth is not None else None,
+            lora=lora,
+            float_point=float_point,
+            subscale=fused_s1.to(device="cpu") if fused_s1 is not None else None,
+        )
+        
+        # Rename to match Nunchaku naming: proj_down, proj_up instead of lora_down, lora_up
+        if "lora_down" in converted:
+            converted["proj_down"] = converted.pop("lora_down")
+        if "lora_up" in converted:
+            converted["proj_up"] = converted.pop("lora_up")
+        if "smooth" in converted:
+            converted["smooth_factor"] = converted.pop("smooth")
+        if "smooth_orig" in converted:
+            converted["smooth_factor_orig"] = converted.pop("smooth_orig")
+        
+        # Ensure wcscales for nvfp4
+        if float_point and "wcscales" not in converted:
+            converted["wcscales"] = torch.ones(fused_w.shape[0], dtype=torch_dtype, device="cpu")
+        
+        # Write to output
+        for kk, vv in converted.items():
+            out_state[f"{module_name}.{kk}"] = vv
+        
+        # Remove original keys
+        for name in qkv_modules:
+            if f"{name}.weight" in out_state:
+                del out_state[f"{name}.weight"]
+    else:
+        # Single linear layer
+        weight_key = f"{module_name}.weight"
+        if weight_key not in orig_state:
+            return
+        
+        weight = orig_state[weight_key]
+        bias = orig_state.get(f"{module_name}.bias", None)
+        
+        s0, s1 = _get_scale(module_name)
+        if s0 is None:
+            return  # Not quantized
+        
+        branch = _get_branch(module_name)
+        smooth = _get_smooth(module_name)
+        
+        converted = convert_to_nunchaku_w4x4y16_linear_state_dict(
+            weight=weight.to(dtype=torch_dtype, device="cpu"),
+            scale=s0.to(device="cpu"),
+            bias=bias.to(dtype=torch_dtype, device="cpu") if bias is not None else None,
+            smooth=smooth.to(device="cpu") if smooth is not None else None,
+            lora=branch,
+            float_point=float_point,
+            subscale=s1.to(device="cpu") if s1 is not None else None,
+        )
+        
+        # Rename to match Nunchaku naming
+        if "lora_down" in converted:
+            converted["proj_down"] = converted.pop("lora_down")
+        if "lora_up" in converted:
+            converted["proj_up"] = converted.pop("lora_up")
+        if "smooth" in converted:
+            converted["smooth_factor"] = converted.pop("smooth")
+        if "smooth_orig" in converted:
+            converted["smooth_factor_orig"] = converted.pop("smooth_orig")
+        
+        # Ensure wcscales for nvfp4
+        if float_point and "wcscales" not in converted:
+            converted["wcscales"] = torch.ones(weight.shape[0], dtype=torch_dtype, device="cpu")
+        
+        # Write to output
+        if f"{module_name}.weight" in out_state:
+            del out_state[f"{module_name}.weight"]
+        if f"{module_name}.bias" in out_state:
+            del out_state[f"{module_name}.bias"]
+        
+        for kk, vv in converted.items():
+            out_state[f"{module_name}.{kk}"] = vv
+
+
+def _zit_export_to_nunchaku_single_safetensors(
+    *,
+    output_path: str,
+    orig_transformer_path: str,
+    dequant_state: dict[str, torch.Tensor],
+    scale_state: dict[str, torch.Tensor],
+    branch_state: dict[str, dict[str, torch.Tensor]] | None,
+    rank: int,
+    precision: str,
+    torch_dtype: torch.dtype,
+    transformer,
+) -> None:
+    """Export Z-Image Turbo Nunchaku safetensors file."""
+    logger = tools.logging.getLogger(__name__)
+    
+    assert orig_transformer_path, "orig_transformer_path is required"
+    assert os.path.exists(orig_transformer_path), f"File not found: {orig_transformer_path}"
+    
+    # Load original weights
+    orig_state = _load_safetensors_state_dict(orig_transformer_path)
+    out_state: dict[str, torch.Tensor] = dict(orig_state)
+    
+    float_point = precision == "nvfp4"
+    
+    # Z-Image Turbo structure (from analysis):
+    # - layers.0-29: main transformer layers
+    # - context_refiner.0-1: context refiner layers
+    # - noise_refiner.0-1: noise refiner layers
+    # Each layer has:
+    #   - attention.to_q/to_k/to_v -> fused to attention.to_qkv
+    #   - attention.to_out.0
+    #   - feed_forward.net.0.proj
+    #   - feed_forward.net.2
+    
+    # Collect layer prefixes
+    main_layers = [f"layers.{i}" for i in range(30)]
+    context_refiner_layers = [f"context_refiner.{i}" for i in range(2)]
+    noise_refiner_layers = [f"noise_refiner.{i}" for i in range(2)]
+    all_layers = main_layers + context_refiner_layers + noise_refiner_layers
+    
+    logger.info(f"* Exporting Nunchaku Z-Image Turbo: processing {len(all_layers)} layers")
+    
+    for layer_prefix in all_layers:
+        # QKV fusion: attention.to_q/to_k/to_v -> attention.to_qkv
+        q_name = f"{layer_prefix}.attention.to_q"
+        k_name = f"{layer_prefix}.attention.to_k"
+        v_name = f"{layer_prefix}.attention.to_v"
+        qkv_name = f"{layer_prefix}.attention.to_qkv"
+        
+        _process_zit_linear(
+            module_name=qkv_name,
+            orig_state=orig_state,
+            dequant_state=dequant_state,
+            scale_state=scale_state,
+            branch_state=branch_state,
+            out_state=out_state,
+            rank=rank,
+            torch_dtype=torch_dtype,
+            float_point=float_point,
+            is_qkv_fused=True,
+            qkv_modules=[q_name, k_name, v_name],
+        )
+        
+        # attention.to_out.0
+        _process_zit_linear(
+            module_name=f"{layer_prefix}.attention.to_out.0",
+            orig_state=orig_state,
+            dequant_state=dequant_state,
+            scale_state=scale_state,
+            branch_state=branch_state,
+            out_state=out_state,
+            rank=rank,
+            torch_dtype=torch_dtype,
+            float_point=float_point,
+        )
+        
+        # feed_forward.net.0.proj
+        _process_zit_linear(
+            module_name=f"{layer_prefix}.feed_forward.net.0.proj",
+            orig_state=orig_state,
+            dequant_state=dequant_state,
+            scale_state=scale_state,
+            branch_state=branch_state,
+            out_state=out_state,
+            rank=rank,
+            torch_dtype=torch_dtype,
+            float_point=float_point,
+        )
+        
+        # feed_forward.net.2
+        _process_zit_linear(
+            module_name=f"{layer_prefix}.feed_forward.net.2",
+            orig_state=orig_state,
+            dequant_state=dequant_state,
+            scale_state=scale_state,
+            branch_state=branch_state,
+            out_state=out_state,
+            rank=rank,
+            torch_dtype=torch_dtype,
+            float_point=float_point,
+        )
+    
+    # Save output
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    metadata = _zit_export_build_metadata(transformer=transformer, rank=rank, precision=precision)
+    logger.info(f"* Saving Nunchaku Z-Image Turbo to {output_path}")
+    safetensors.torch.save_file(out_state, output_path, metadata=metadata)
+
+
+def ptq(
     model: DiffusionModelStruct,
     config: DiffusionQuantConfig,
     cache: DiffusionPtqCacheConfig | None = None,
@@ -32,29 +393,9 @@ def ptq(  # noqa: C901
     save_dirpath: str = "",
     copy_on_save: bool = False,
     save_model: bool = False,
+    export_nunchaku_zit: dict | None = None,
 ) -> DiffusionModelStruct:
-    """Post-training quantization of a diffusion model.
-
-    Args:
-        model (`DiffusionModelStruct`):
-            The diffusion model.
-        config (`DiffusionQuantConfig`):
-            The diffusion model post-training quantization configuration.
-        cache (`DiffusionPtqCacheConfig`, *optional*, defaults to `None`):
-            The diffusion model quantization cache path configuration.
-        load_dirpath (`str`, *optional*, defaults to `""`):
-            The directory path to load the quantization checkpoint.
-        save_dirpath (`str`, *optional*, defaults to `""`):
-            The directory path to save the quantization checkpoint.
-        copy_on_save (`bool`, *optional*, defaults to `False`):
-            Whether to copy the cache to the save directory.
-        save_model (`bool`, *optional*, defaults to `False`):
-            Whether to save the quantized model checkpoint.
-
-    Returns:
-        `DiffusionModelStruct`:
-            The quantized diffusion model.
-    """
+    """Post-training quantization of Z-Image Turbo model."""
     logger = tools.logging.getLogger(__name__)
     if not isinstance(model, DiffusionModelStruct):
         model = DiffusionModelStruct.construct(model)
@@ -77,21 +418,17 @@ def ptq(  # noqa: C901
         load_model_path = os.path.join(load_dirpath, "model.pt")
         if os.path.exists(load_model_path):
             if config.enabled_wgts and config.wgts.enabled_low_rank:
-                if os.path.exists(load_path.branch):
-                    load_model = True
-                else:
-                    logger.warning(f"Model low-rank branch checkpoint {load_path.branch} does not exist")
-                    load_model = False
+                load_model = os.path.exists(load_path.branch)
             else:
                 load_model = True
             if load_model:
                 logger.info(f"* Loading model from {load_model_path}")
-                save_dirpath = ""  # do not save the model if loading
+                save_dirpath = ""
         else:
-            logger.warning(f"Model checkpoint {load_model_path} does not exist")
             load_model = False
     else:
         load_model = False
+    
     if save_dirpath:
         os.makedirs(save_dirpath, exist_ok=True)
         save_path = DiffusionQuantCacheConfig(
@@ -103,15 +440,7 @@ def ptq(  # noqa: C901
     else:
         save_model = False
 
-    if quant and config.enabled_rotation:
-        logger.info("* Rotating model for quantization")
-        tools.logging.Formatter.indent_inc()
-        rotate_diffusion(model, config=config)
-        tools.logging.Formatter.indent_dec()
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    # region smooth quantization
+    # Smooth quantization
     if quant and config.enabled_smooth:
         logger.info("* Smoothing model for quantization")
         tools.logging.Formatter.indent_inc()
@@ -131,32 +460,12 @@ def ptq(  # noqa: C901
                 logger.info(f"- Saving smooth scales to {cache.path.smooth}")
                 os.makedirs(cache.dirpath.smooth, exist_ok=True)
                 torch.save(smooth_cache, cache.path.smooth)
-                load_from = cache.path.smooth
-        if save_path:
-            if not copy_on_save and load_from:
-                logger.info(f"- Linking smooth scales to {save_path.smooth}")
-                os.symlink(os.path.relpath(load_from, save_dirpath), save_path.smooth)
-            else:
-                logger.info(f"- Saving smooth scales to {save_path.smooth}")
-                torch.save(smooth_cache, save_path.smooth)
         del smooth_cache
         tools.logging.Formatter.indent_dec()
         gc.collect()
         torch.cuda.empty_cache()
-    # endregion
-    # region collect original state dict
-    if config.needs_acts_quantizer_cache:
-        if load_path and os.path.exists(load_path.acts):
-            orig_state_dict = None
-        elif cache and cache.path.acts and os.path.exists(cache.path.acts):
-            orig_state_dict = None
-        else:
-            orig_state_dict: dict[str, torch.Tensor] = {
-                name: param.detach().clone() for name, param in model.module.named_parameters() if param.ndim > 1
-            }
-    else:
-        orig_state_dict = None
-    # endregion
+
+    # Weight quantization
     if load_model:
         logger.info(f"* Loading model checkpoint from {load_model_path}")
         load_diffusion_weights_state_dict(
@@ -186,200 +495,133 @@ def ptq(  # noqa: C901
         if branch_load_from:
             logger.info(f"- Loading branch settings from {branch_load_from}")
             branch_state_dict = torch.load(branch_load_from)
-        if not quantizer_load_from:
-            logger.info("- Generating weight settings")
-        if not branch_load_from:
-            logger.info("- Generating branch settings")
+        
         quantizer_state_dict, branch_state_dict, scale_state_dict = quantize_diffusion_weights(
             model,
             config,
             quantizer_state_dict=quantizer_state_dict,
             branch_state_dict=branch_state_dict,
-            return_with_scale_state_dict=bool(save_dirpath),
+            return_with_scale_state_dict=bool(save_dirpath) or bool(save_model) or bool(export_nunchaku_zit),
         )
+        
         if not quantizer_load_from and cache and cache.dirpath.wgts:
             logger.info(f"- Saving weight settings to {cache.path.wgts}")
             os.makedirs(cache.dirpath.wgts, exist_ok=True)
             torch.save(quantizer_state_dict, cache.path.wgts)
-            quantizer_load_from = cache.path.wgts
         if not branch_load_from and cache and cache.dirpath.branch:
             logger.info(f"- Saving branch settings to {cache.path.branch}")
             os.makedirs(cache.dirpath.branch, exist_ok=True)
             torch.save(branch_state_dict, cache.path.branch)
-            branch_load_from = cache.path.branch
-        if save_path:
-            if not copy_on_save and quantizer_load_from:
-                logger.info(f"- Linking weight settings to {save_path.wgts}")
-                os.symlink(os.path.relpath(quantizer_load_from, save_dirpath), save_path.wgts)
-            else:
-                logger.info(f"- Saving weight settings to {save_path.wgts}")
-                torch.save(quantizer_state_dict, save_path.wgts)
-            if not copy_on_save and branch_load_from:
-                logger.info(f"- Linking branch settings to {save_path.branch}")
-                os.symlink(os.path.relpath(branch_load_from, save_dirpath), save_path.branch)
-            else:
-                logger.info(f"- Saving branch settings to {save_path.branch}")
-                torch.save(branch_state_dict, save_path.branch)
-        if save_model:
-            logger.info(f"- Saving model to {save_dirpath}")
-            torch.save(scale_state_dict, os.path.join(save_dirpath, "scale.pt"))
-            torch.save(model.module.state_dict(), os.path.join(save_dirpath, "model.pt"))
+        
+        if export_nunchaku_zit:
+            export_path = export_nunchaku_zit["output_path"]
+            orig_path = export_nunchaku_zit["orig_transformer_path"]
+            transformer = export_nunchaku_zit["transformer"]
+            rank_val = int(export_nunchaku_zit["rank"])
+            precision_val = export_nunchaku_zit["precision"]
+            dtype_val = export_nunchaku_zit["torch_dtype"]
+            
+            dequant_state = {k: v.detach().cpu() for k, v in transformer.state_dict().items()}
+            _zit_export_to_nunchaku_single_safetensors(
+                output_path=export_path,
+                orig_transformer_path=orig_path,
+                dequant_state=dequant_state,
+                scale_state=scale_state_dict,
+                branch_state=branch_state_dict,
+                rank=rank_val,
+                precision=precision_val,
+                torch_dtype=dtype_val,
+                transformer=transformer,
+            )
+        
         del quantizer_state_dict, branch_state_dict, scale_state_dict
         tools.logging.Formatter.indent_dec()
         gc.collect()
         torch.cuda.empty_cache()
-    if quant_acts:
-        logger.info("  * Quantizing activations")
-        tools.logging.Formatter.indent_inc()
-        if config.needs_acts_quantizer_cache:
-            load_from = ""
-            if load_path and os.path.exists(load_path.acts):
-                load_from = load_path.acts
-            elif cache and cache.path.acts and os.path.exists(cache.path.acts):
-                load_from = cache.path.acts
-            if load_from:
-                logger.info(f"- Loading activation settings from {load_from}")
-                quantizer_state_dict = torch.load(load_from)
-                quantize_diffusion_activations(
-                    model, config, quantizer_state_dict=quantizer_state_dict, orig_state_dict=orig_state_dict
-                )
-            else:
-                logger.info("- Generating activation settings")
-                quantizer_state_dict = quantize_diffusion_activations(model, config, orig_state_dict=orig_state_dict)
-                if cache and cache.dirpath.acts and quantizer_state_dict is not None:
-                    logger.info(f"- Saving activation settings to {cache.path.acts}")
-                    os.makedirs(cache.dirpath.acts, exist_ok=True)
-                    torch.save(quantizer_state_dict, cache.path.acts)
-                load_from = cache.path.acts
-            if save_dirpath:
-                if not copy_on_save and load_from:
-                    logger.info(f"- Linking activation quantizer settings to {save_path.acts}")
-                    os.symlink(os.path.relpath(load_from, save_dirpath), save_path.acts)
-                else:
-                    logger.info(f"- Saving activation quantizer settings to {save_path.acts}")
-                    torch.save(quantizer_state_dict, save_path.acts)
-            del quantizer_state_dict
-        else:
-            logger.info("- No need to generate/load activation quantizer settings")
-            quantize_diffusion_activations(model, config, orig_state_dict=orig_state_dict)
-        tools.logging.Formatter.indent_dec()
-        del orig_state_dict
-        gc.collect()
-        torch.cuda.empty_cache()
+    
     return model
 
 
 def main(config: DiffusionPtqRunConfig, logging_level: int = tools.logging.DEBUG) -> DiffusionPipeline:
-    """Post-training quantization of a diffusion model.
-
-    Args:
-        config (`DiffusionPtqRunConfig`):
-            The diffusion model post-training quantization configuration.
-        logging_level (`int`, *optional*, defaults to `logging.DEBUG`):
-            The logging level.
-
-    Returns:
-        `DiffusionPipeline`:
-            The diffusion pipeline with quantized model.
-    """
+    """Post-training quantization of Z-Image Turbo model."""
     config.output.lock()
     config.dump(path=config.output.get_running_job_path("config.yaml"))
     tools.logging.setup(path=config.output.get_running_job_path("run.log"), level=logging_level)
     logger = tools.logging.getLogger(__name__)
 
-    logger.info("=== Configurations ===")
+    logger.info("=== Z-Image Turbo Quantization ===")
     tools.logging.info(config.formatted_str(), logger=logger)
-    logger.info("=== Dumped Configurations ===")
-    tools.logging.info(pprint.pformat(config.dump(), indent=2, width=120), logger=logger)
     logger.info("=== Output Directory ===")
     logger.info(config.output.job_dirpath)
 
-    logger.info("=== Start Evaluating ===")
-    logger.info("* Building diffusion model pipeline")
+    logger.info("=== Building Pipeline ===")
     tools.logging.Formatter.indent_inc()
     pipeline = config.pipeline.build()
-    if "nf4" not in config.pipeline.name and "gguf" not in config.pipeline.name:
-        model = DiffusionModelStruct.construct(pipeline)
-        tools.logging.Formatter.indent_dec()
-        save_dirpath = os.path.join(config.output.running_job_dirpath, "cache")
-        if config.save_model:
-            if config.save_model.lower() in ("false", "none", "null", "nil"):
-                save_model = False
-            elif config.save_model.lower() in ("true", "default"):
-                save_dirpath, save_model = os.path.join(config.output.running_job_dirpath, "model"), True
-            else:
-                save_dirpath, save_model = config.save_model, True
-        else:
-            save_model = False
-        model = ptq(
-            model,
-            config.quant,
-            cache=config.cache,
-            load_dirpath=config.load_from,
-            save_dirpath=save_dirpath,
-            copy_on_save=config.copy_on_save,
-            save_model=save_model,
-        )
-    if config.pipeline.lora is not None:
-        load_from = ""
-        if config.quant.enabled_smooth:
-            if config.load_from and os.path.exists(os.path.join(config.load_from, "smooth.pt")):
-                load_from = os.path.join(config.load_from, "smooth.pt")
-            elif config.cache.path and os.path.exists(config.cache.path.smooth):
-                load_from = config.cache.path.smooth
-            elif os.path.exists(os.path.join(save_dirpath, "smooth.pt")):
-                load_from = os.path.join(save_dirpath, "smooth.pt")
-            logger.info(f"* Loading smooth scales from {load_from}")
-        config.pipeline.load_lora(pipeline, smooth_cache=torch.load(load_from) if load_from else None)
-    if config.text is not None and config.text.is_enabled():
-        for encoder_name, encoder, tokenizer in config.pipeline.extract_text_encoders(pipeline):
-            logger.info(f"* Post-training quantizing the text encoder {encoder_name}")
-            patch_attention(encoder)
-            patch_gemma_rms_norm(encoder)
-            save_dirpath = os.path.join(save_dirpath, "encoder")
-            setattr(
-                pipeline,
-                encoder_name,
-                llm_ptq(
-                    encoder,
-                    tokenizer,
-                    config.text,
-                    cache=config.text_cache,
-                    load_dirpath=os.path.join(config.load_from, "encoder") if config.load_from else "",
-                    save_dirpath=save_dirpath,
-                    copy_on_save=config.copy_on_save,
-                    save_model=save_model,
-                ),
-            )
-    config.eval.gen_root = config.eval.gen_root.format(
-        output=config.output.running_dirpath, job=config.output.running_job_dirname
-    )
-    if config.skip_eval:
-        if not config.skip_gen:
-            logger.info("* Generating image")
-            tools.logging.Formatter.indent_inc()
-            config.eval.generate(pipeline, task=config.pipeline.task)
-            tools.logging.Formatter.indent_dec()
+    
+    # Load transformer weights if specified
+    if hasattr(config.pipeline, "transformer_path") and config.pipeline.transformer_path:
+        logger.info(f"* Loading transformer weights from {config.pipeline.transformer_path}")
+        transformer = getattr(pipeline, "transformer", None)
+        if transformer is not None:
+            state_dict = _load_safetensors_state_dict(config.pipeline.transformer_path)
+            transformer.load_state_dict(state_dict, strict=False)
+            del state_dict
+            gc.collect()
+            torch.cuda.empty_cache()
+    
+    model = DiffusionModelStruct.construct(pipeline)
+    tools.logging.Formatter.indent_dec()
+    
+    save_dirpath = ""
+    if hasattr(config, "export_nunchaku_zit") and config.export_nunchaku_zit:
+        save_dirpath = ""
+        save_model = False
+    elif hasattr(config, "save_model") and config.save_model:
+        save_dirpath = os.path.join(config.output.running_job_dirpath, "model")
+        save_model = True
     else:
-        logger.info(f"* Evaluating model {'(skipping generation)' if config.skip_gen else ''}")
-        tools.logging.Formatter.indent_inc()
-        results = config.eval.evaluate(pipeline, skip_gen=config.skip_gen, task=config.pipeline.task)
-        tools.logging.Formatter.indent_dec()
-        if results is not None:
-            logger.info(f"* Saving results to {config.output.job_dirpath}")
-            with open(config.output.get_running_job_path("results.json"), "w") as f:
-                json.dump(results, f, indent=2, sort_keys=True)
-    config.output.unlock()
+        save_model = False
+    
+    export_ctx = None
+    if hasattr(config, "export_nunchaku_zit") and config.export_nunchaku_zit:
+        if not hasattr(config.pipeline, "transformer_path") or not config.pipeline.transformer_path:
+            raise ValueError("export_nunchaku_zit requires pipeline.transformer_path")
+        if not config.quant.enabled_wgts:
+            raise ValueError("export_nunchaku_zit requires weight quantization enabled")
+        
+        transformer = getattr(pipeline, "transformer", None)
+        export_ctx = {
+            "output_path": config.export_nunchaku_zit,
+            "orig_transformer_path": config.pipeline.transformer_path,
+            "transformer": transformer,
+            "rank": int(config.quant.wgts.low_rank.rank) if config.quant.wgts.low_rank else 128,
+            "precision": _detect_precision(config.quant.wgts.dtype),
+            "torch_dtype": config.pipeline.dtype,
+        }
+    
+    model = ptq(
+        model,
+        config.quant,
+        cache=config.cache,
+        load_dirpath=getattr(config, "load_from", ""),
+        save_dirpath=save_dirpath,
+        copy_on_save=getattr(config, "copy_on_save", False),
+        save_model=save_model,
+        export_nunchaku_zit=export_ctx,
+    )
+    
+    tools.logging.shutdown()
+    try:
+        config.output.unlock()
+    except Exception:
+        pass
+    
+    return pipeline
 
 
 if __name__ == "__main__":
     config, _, unused_cfgs, unused_args, unknown_args = DiffusionPtqRunConfig.get_parser().parse_known_args()
     assert isinstance(config, DiffusionPtqRunConfig)
-    if len(unused_cfgs) > 0:
-        tools.logging.warning(f"Unused configurations: {unused_cfgs}")
-    if unused_args is not None:
-        tools.logging.warning(f"Unused arguments: {unused_args}")
-    assert len(unknown_args) == 0, f"Unknown arguments: {unknown_args}"
     try:
         main(config, logging_level=tools.logging.DEBUG)
     except Exception as e:
