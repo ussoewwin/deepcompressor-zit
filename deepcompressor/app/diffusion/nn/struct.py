@@ -36,6 +36,7 @@ from diffusers.models.transformers.transformer_flux import (
     FluxTransformerBlock,
 )
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
+from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel, ZImageTransformerBlock
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.models.unets.unet_2d_blocks import (
     CrossAttnDownBlock2D,
@@ -57,6 +58,7 @@ from diffusers.pipelines import (
     StableDiffusionPipeline,
     StableDiffusionXLPipeline,
 )
+from diffusers.pipelines.z_image.pipeline_z_image import ZImagePipeline
 
 from deepcompressor.nn.patch.conv import ConcatConv2d, ShiftedConv2d
 from deepcompressor.nn.patch.linear import ConcatLinear, ShiftedLinear
@@ -85,6 +87,7 @@ DIT_BLOCK_CLS = tp.Union[
     FluxSingleTransformerBlock,
     FluxTransformerBlock,
     SanaTransformerBlock,
+    ZImageTransformerBlock,
 ]
 UNET_BLOCK_CLS = tp.Union[
     DownBlock2D,
@@ -100,6 +103,7 @@ DIT_CLS = tp.Union[
     SD3Transformer2DModel,
     FluxTransformer2DModel,
     SanaTransformer2DModel,
+    ZImageTransformer2DModel,
 ]
 UNET_CLS = tp.Union[UNet2DModel, UNet2DConditionModel]
 MODEL_CLS = tp.Union[DIT_CLS, UNET_CLS]
@@ -112,6 +116,7 @@ DIT_PIPELINE_CLS = tp.Union[
     FluxControlPipeline,
     FluxFillPipeline,
     SanaPipeline,
+    ZImagePipeline,
 ]
 PIPELINE_CLS = tp.Union[UNET_PIPELINE_CLS, DIT_PIPELINE_CLS]
 
