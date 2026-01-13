@@ -119,7 +119,7 @@ def load_zit_transformer(
 
 
 def build_zit_pipeline(
-    transformer_path: str,
+    transformer_path: str | None,
     hf_model_path: str = "Tongyi-MAI/Z-Image-Turbo",
     dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
@@ -131,6 +131,7 @@ def build_zit_pipeline(
     
     Args:
         transformer_path: Path to the transformer safetensors file.
+                          If None, loads directly from HuggingFace.
         hf_model_path: HuggingFace model path for T5 encoder and scheduler.
         dtype: Model dtype (default: bfloat16).
         device: Device to load the model on.
@@ -140,16 +141,23 @@ def build_zit_pipeline(
     """
     print(f"Building ZIT pipeline from HuggingFace: {hf_model_path}")
     
-    # Load transformer from safetensors
-    transformer = load_zit_transformer(transformer_path, dtype, device="cpu")
-    
-    # Build full pipeline with T5 encoder, scheduler, etc.
-    pipe = ZImagePipeline.from_pretrained(
-        hf_model_path,
-        transformer=transformer,
-        torch_dtype=dtype,
-        low_cpu_mem_usage=False,
-    )
+    if transformer_path:
+        # Load transformer from local safetensors file
+        transformer = load_zit_transformer(transformer_path, dtype, device="cpu")
+        pipe = ZImagePipeline.from_pretrained(
+            hf_model_path,
+            transformer=transformer,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=False,
+        )
+    else:
+        # Load entire pipeline directly from HuggingFace
+        print("No transformer_path provided, loading from HuggingFace directly...")
+        pipe = ZImagePipeline.from_pretrained(
+            hf_model_path,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=False,
+        )
     
     # Move to device
     pipe = pipe.to(device)
