@@ -1,88 +1,78 @@
 import os
-import sys
-import subprocess
 import shutil
+import subprocess
+import sys
 
-deepcompressor_path = '/deepcompressor-zit'
-datasets_root = os.path.join(deepcompressor_path, 'datasets/torch.bfloat16/zimage/euler4-g3.5')
+# 絶対パス設定
+BASE_DIR = os.path.abspath("/deepcompressor-zit")
+CALIB_CACHE_DIR = os.path.join(BASE_DIR, "datasets/torch.bfloat16/zimage/euler4-g3.5/zit_calib")
+RUN_CACHE_DIR = os.path.join(BASE_DIR, "runs/diffusion/cache")
 
-# 1. git pull (最新のコード・設定を取得)
-print("\n=== Step 1: Updating Code (git fetch + reset) ===")
-subprocess.run(['git', 'config', '--global', '--add', 'safe.directory', deepcompressor_path], check=False)
-subprocess.run(['git', 'fetch', '--all'], cwd=deepcompressor_path, check=False)
-result = subprocess.run(['git', 'reset', '--hard', 'origin/main'], cwd=deepcompressor_path, check=False)
-if result.returncode != 0:
-    print("WARNING: git reset returned non-zero. Please check connection.")
+print("=== Starting Full ZIT Pipeline ===")
+print(f"Base Dir: {BASE_DIR}")
 
-# 2. キャッシュクリア (古いキャリブレーションデータを削除)
+# Step 1: Update Code
+print("\n=== Step 1: Verification ===")
+# Git操作はコマンドラインで行うためここではスキップ、あるいは確認のみ
+
+# Step 2: Clear Cache
 print("\n=== Step 2: Clearing Old Cache ===")
-zit_calib_path = os.path.join(datasets_root, 'zit_calib')
-runs_cache_path = os.path.join(deepcompressor_path, 'runs/diffusion/cache')
-
-# キャリブレーションキャッシュ削除
-if os.path.exists(zit_calib_path):
-    print(f"Deleting: {zit_calib_path}")
-    shutil.rmtree(zit_calib_path)
-    print("[OK] Calibration cache deleted")
+if os.path.exists(CALIB_CACHE_DIR):
+    print(f"Deleting calibration cache: {CALIB_CACHE_DIR}")
+    shutil.rmtree(CALIB_CACHE_DIR)
+    if os.path.exists(CALIB_CACHE_DIR):
+        print("ERROR: Failed to delete cache directory.")
+        sys.exit(1)
+    print("Cache deleted successfully.")
 else:
-    print(f"[SKIP] No calibration cache at {zit_calib_path}")
+    print(f"Cache not found (already clean): {CALIB_CACHE_DIR}")
 
-# 量子化キャッシュ削除
-if os.path.exists(runs_cache_path):
-    print(f"Deleting: {runs_cache_path}")
-    shutil.rmtree(runs_cache_path)
-    print("[OK] Quantization cache deleted")
-else:
-    print(f"[SKIP] No quantization cache at {runs_cache_path}")
+if os.path.exists(RUN_CACHE_DIR):
+    print(f"Deleting run cache: {RUN_CACHE_DIR}")
+    shutil.rmtree(RUN_CACHE_DIR)
 
-# 3. キャリブレーション再収集
+# Step 3: Run Calibration
 print("\n=== Step 3: Collecting Calibration Data ===")
+calib_cmd = [
+    "python3", "-u", "-m", "deepcompressor.app.diffusion.dataset.collect.calib",
+    "examples/diffusion/configs/model/zit.yaml",
+    "examples/diffusion/configs/collect/zit.yaml"
+]
+
 env = os.environ.copy()
-env['PYTHONPATH'] = deepcompressor_path
+env['PYTHONPATH'] = BASE_DIR
 env['XFORMERS_DISABLED'] = '1'
 env['PYTHONUNBUFFERED'] = '1'
 
-calib_cmd = [
-    'python3', '-u', '-m', 'deepcompressor.app.diffusion.dataset.collect.calib',
-    'examples/diffusion/configs/model/zit.yaml',
-    'examples/diffusion/configs/collect/zit.yaml',
-]
-
-result = subprocess.run(calib_cmd, cwd=deepcompressor_path, env=env, check=False)
-if result.returncode != 0:
-    print(f"\nERROR: Calibration failed with code {result.returncode}")
-    sys.exit(result.returncode)
-
-# 4. キャッシュ確認
-print("\n=== Step 4: Verifying Cache Location ===")
-target_cache = os.path.join(zit_calib_path, 's128')
-
-if os.path.exists(target_cache):
-    print(f"[OK] Cache found at: {target_cache}")
-    cache_files = os.listdir(target_cache)
-    print(f"Cache contains {len(cache_files)} files/folders")
-else:
-    print(f"ERROR: Cache not found at {target_cache}")
-    print("Calibration may have failed.")
+try:
+    print(f"Executing: {' '.join(calib_cmd)}")
+    subprocess.run(calib_cmd, env=env, check=True, cwd=BASE_DIR)
+    print("Calibration command finished.")
+except subprocess.CalledProcessError as e:
+    print(f"ERROR: Calibration failed with exit code {e.returncode}")
     sys.exit(1)
 
-# 5. 量子化実行
-print("\n=== Step 5: Running Quantization (r128) ===")
-output_path = '/root/models/z_image_turbo-r128-svdq-fp4.safetensors'
+# Verify Calibration Output
+if not os.path.exists(CALIB_CACHE_DIR):
+    print("ERROR: Calibration cache directory was not created!")
+    sys.exit(1)
+
+num_files = sum([len(files) for r, d, files in os.walk(CALIB_CACHE_DIR) if any(f.endswith('.pt') for f in files)])
+print(f"Generated {num_files} .pt files in cache.")
+if num_files == 0:
+    print("ERROR: No calibration files generated!")
+    sys.exit(1)
+
+# Step 4: Run Quantization
+print("\n=== Step 4: Running Quantization ===")
 quant_cmd = [
-    'python3', '-u', '-m', 'deepcompressor.app.diffusion.ptq',
-    'examples/diffusion/configs/model/zit.yaml',
-    'examples/diffusion/configs/svdquant/fp4.yaml',
-    '--skip-eval',
-    '--skip-gen',
-    '--export-nunchaku-zit', output_path,
-    '--cleanup-run-cache-after-export'
+    "python3", "-u", "run_quantize_zit.py"
 ]
 
-result = subprocess.run(quant_cmd, cwd=deepcompressor_path, env=env, check=False)
-
-if result.returncode != 0:
-    print(f"\nERROR: Quantization failed with code {result.returncode}")
-    sys.exit(result.returncode)
-else:
-    print(f"\nSUCCESS: Output saved to {output_path}")
+try:
+    print(f"Executing: {' '.join(quant_cmd)}")
+    subprocess.run(quant_cmd, env=env, check=True, cwd=BASE_DIR)
+    print("Quantization finished successfully.")
+except subprocess.CalledProcessError as e:
+    print(f"ERROR: Quantization failed with exit code {e.returncode}")
+    sys.exit(1)
