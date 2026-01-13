@@ -1726,6 +1726,15 @@ class DiTStruct(DiffusionModelStruct, DiffusionTransformerStruct):
                 norm_out, norm_out_rname = module.norm_out, "norm_out"
                 proj_out, proj_out_rname = module.proj_out, "proj_out"
                 transformer_blocks, transformer_blocks_rname = module.transformer_blocks, "transformer_blocks"
+            elif isinstance(module, ZImageTransformer2DModel):
+                # Z-Image Turbo transformer structure
+                # Uses all_x_embedder for input embedding, t_embedder for time, cap_embedder for text
+                input_embed, input_embed_rname = module.all_x_embedder, "all_x_embedder"
+                time_embed, time_embed_rname = module.t_embedder, "t_embedder"
+                text_embed, text_embed_rname = module.cap_embedder, "cap_embedder"
+                norm_out, norm_out_rname = module.all_final_layer, "all_final_layer"
+                proj_out, proj_out_rname = None, ""  # No separate proj_out, integrated in final_layer
+                transformer_blocks, transformer_blocks_rname = module.layers, "layers"
             else:
                 raise NotImplementedError(f"Unsupported module type: {type(module)}")
             return DiTStruct(
