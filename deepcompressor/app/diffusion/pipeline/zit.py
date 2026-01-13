@@ -211,14 +211,24 @@ def build_zit_pipeline(
             self.original_embedder = original_embedder
             
         def forward(self, x):
-            # Unconditional debug print
-            print(f"DEBUG: ZITPatchEmbedWrapper forward input: {x.shape}")
-            # Detect flattened input: [Batch*16, 1, H, W] -> needs [Batch, 16, H, W]
-            if x.dim() == 4 and x.shape[1] == 1:
-                if x.shape[0] % 16 == 0:
-                     print(f"DEBUG: Reshaping 1-channel flattened input to 16-channel")
-                     batch_size = x.shape[0] // 16
-                     x = x.view(batch_size, 16, x.shape[2], x.shape[3])
+            try:
+                import sys
+                # Aggressive debug print with flush
+                print(f"DEBUG: ZITPatchEmbedWrapper input shape: {x.shape}", flush=True)
+                
+                # Detect 1-channel bad input [Batch*16, 1, H, W]
+                # Even if dim/mod check fails, if channel is 1, we suspect it's wrong for ZIT (which needs 16)
+                if x.dim() == 4 and x.shape[1] == 1:
+                    if x.shape[0] % 16 == 0:
+                        print(f"DEBUG: FORCE RESHAPING 1-channel input to 16-channel...", flush=True)
+                        b = x.shape[0] // 16
+                        x = x.view(b, 16, x.shape[2], x.shape[3])
+                        print(f"DEBUG: Reshaped to {x.shape}", flush=True)
+                    else:
+                        print(f"DEBUG: Input has 1 channel but batch {x.shape[0]} not divisible by 16. Skipping.", flush=True)
+            except Exception as e:
+                print(f"DEBUG: Wrapper Error: {e}", flush=True)
+                
             return self.original_embedder(x)
         
         def __getattr__(self, name):
