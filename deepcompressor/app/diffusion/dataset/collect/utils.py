@@ -62,11 +62,12 @@ class CollectHook:
         elif isinstance(module, ZImageTransformer2DModel):
             # ZIT uses 'x' as the main input (list of latent tensors)
             x = input_kwargs.pop("x")
-            print(f"DEBUG: CollectHook ZIT input x type: {type(x)}")
-            if hasattr(x, "shape"):
-                print(f"DEBUG: CollectHook ZIT input x shape: {x.shape}")
-            elif isinstance(x, list) and len(x) > 0:
-                 print(f"DEBUG: CollectHook ZIT input x[0] shape: {x[0].shape}, dtype={x[0].dtype}")
+            # DEBUG: Force reshape if input is [16, 1, ...] which causes tree_split to shatter it into 16 samples
+            # This handles the case where pipeline produces (Frames=16, C=1) but Weights expect (B=1, C=16)
+            if isinstance(x, list) and len(x) > 0 and torch.is_tensor(x[0]):
+                if x[0].shape[0] == 16 and x[0].shape[1] == 1:
+                    print(f"DEBUG: Reshaping ZIT input {x[0].shape} -> [1, 16, ...]")
+                    x = [t.transpose(0, 1).contiguous() for t in x]
             new_args.append(x)
         else:
             raise ValueError(f"Unknown model: {module}")
