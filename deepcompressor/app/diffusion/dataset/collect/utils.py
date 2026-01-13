@@ -11,6 +11,7 @@ from diffusers.models.transformers import (
     PixArtTransformer2DModel,
     SanaTransformer2DModel,
 )
+from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 
 from deepcompressor.utils.common import tree_map, tree_split
@@ -58,6 +59,9 @@ class CollectHook:
             new_args.append(input_kwargs.pop("hidden_states"))
         elif isinstance(module, FluxTransformer2DModel):
             new_args.append(input_kwargs.pop("hidden_states"))
+        elif isinstance(module, ZImageTransformer2DModel):
+            # ZIT uses 'x' as the main input (list of latent tensors)
+            new_args.append(input_kwargs.pop("x"))
         else:
             raise ValueError(f"Unknown model: {module}")
         cache = tree_map(lambda x: x.cpu(), {"input_args": new_args, "input_kwargs": input_kwargs, "outputs": output})
