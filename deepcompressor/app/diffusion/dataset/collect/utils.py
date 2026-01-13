@@ -61,7 +61,10 @@ class CollectHook:
             new_args.append(input_kwargs.pop("hidden_states"))
         elif isinstance(module, ZImageTransformer2DModel):
             # ZIT uses 'x' as the main input (list of latent tensors)
-            new_args.append(input_kwargs.pop("x"))
+            x = input_kwargs.pop("x")
+            if isinstance(x, list) and len(x) > 0:
+                 print(f"DEBUG: CollectHook ZIT input x[0] shape: {x[0].shape}, dtype={x[0].dtype}")
+            new_args.append(x)
         else:
             raise ValueError(f"Unknown model: {module}")
         cache = tree_map(lambda x: x.cpu(), {"input_args": new_args, "input_kwargs": input_kwargs, "outputs": output})
