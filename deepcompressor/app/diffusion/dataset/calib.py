@@ -188,6 +188,7 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
             return super()._init_cache(name, module)
 
     def iter_samples(self) -> tp.Generator[ModuleForwardInput, None, None]:
+        import gc
         dataloader = self.dataset.build_loader(
             batch_size=self.batch_size, shuffle=False, drop_last=True, num_workers=self.config.num_workers
         )
@@ -203,11 +204,19 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
                 # Check if this looks like ZIT stacked format: [B, 16, 1, H, W]
                 if x.dim() == 5 and x.shape[1] == 16 and x.shape[2] == 1:
                     # Unstack: [B, 16, 1, H, W] -> list of B tensors, each [16, 1, H, W]
-                    x_list = list(x.unbind(dim=0))
-                    input_args = [x_list] + list(input_args[1:])
-                    print(f"DEBUG: ZIT iter_samples unstacking {x.shape} -> list of {len(x_list)} x {x_list[0].shape}")
+                    # Use clone() to create independent copies, then delete original to free memory
+                    x_list = [t.clone() for t in x.unbind(dim=0)]
+                    del x, input_args
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    input_args = [x_list] + list(data["input_args"][1:])
+                    print(f"DEBUG: ZIT iter_samples unstacking -> list of {len(x_list)} x {x_list[0].shape}")
             
             yield ModuleForwardInput(args=input_args, kwargs=input_kwargs)
+            
+            # Clear after yield
+            del data, input_args, input_kwargs
+            gc.collect()
 
     def _convert_layer_inputs(
         self, m: nn.Module, args: tuple[tp.Any, ...], kwargs: dict[str, tp.Any], save_all: bool = False
