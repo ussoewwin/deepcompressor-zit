@@ -49,7 +49,7 @@ quant:
     enable_attn: false
     proj:
       objective: OutputsError
-      strategy: GridSearch
+      strategy: Manual
       granularity: Layer
       element_batch_size: -1
       sample_batch_size: 1
