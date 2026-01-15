@@ -101,14 +101,27 @@ class ChannelMetric:
             device = device or tensors.device
             return fn(tensors, num_channels, group_shape, device, dtype)
         else:
+            # Optimize for VRAM: Aggregate on CPU
+            agg_device = torch.device("cpu")
+            # Process first item
             rst_0, rst_1 = ChannelMetric._max_reduce(fn, tensors[0], num_channels, group_shape, device, dtype)
+            rst_0 = rst_0.to(device=agg_device)
+            if isinstance(rst_1, torch.Tensor):
+                rst_1 = rst_1.to(device=agg_device)
+            
             for tensor in tensors[1:]:
                 _rst_0, _rst_1 = ChannelMetric._max_reduce(fn, tensor, num_channels, group_shape, device, dtype)
-                rst_0 = torch.maximum(rst_0, _rst_0.to(device=rst_0.device))
+                rst_0 = torch.maximum(rst_0, _rst_0.to(device=agg_device))
                 if isinstance(rst_1, torch.Tensor):
-                    rst_1 = torch.maximum(rst_1, _rst_1.to(device=rst_1.device))
+                    rst_1 = torch.maximum(rst_1, _rst_1.to(device=agg_device))
                 else:
                     rst_1 = max(rst_1, _rst_1)
+            
+            # Final move to requested device
+            if device is not None:
+                rst_0 = rst_0.to(device=device)
+                if isinstance(rst_1, torch.Tensor):
+                    rst_1 = rst_1.to(device=device)
             return rst_0, rst_1
 
     @staticmethod
@@ -128,14 +141,27 @@ class ChannelMetric:
             return fn(tensors.to(device), num_channels, group_shape, device, dtype)
         else:
             assert isinstance(tensors, (list, tuple))
+            # Optimize for VRAM: Aggregate on CPU
+            agg_device = torch.device("cpu")
+            
             rst_0, rst_1 = ChannelMetric._sum_reduce(fn, tensors[0], num_channels, group_shape, device, dtype)
+            rst_0 = rst_0.to(device=agg_device)
+            if isinstance(rst_1, torch.Tensor):
+                rst_1 = rst_1.to(device=agg_device)
+
             for tensor in tensors[1:]:
                 _rst_0, _rst_1 = ChannelMetric._sum_reduce(fn, tensor, num_channels, group_shape, device, dtype)
-                rst_0 += _rst_0.to(device=rst_0.device)
+                rst_0 += _rst_0.to(device=agg_device)
                 if isinstance(rst_1, torch.Tensor):
-                    rst_1 += _rst_1.to(device=rst_1.device)
+                    rst_1 += _rst_1.to(device=agg_device)
                 else:
                     rst_1 += _rst_1
+            
+            if device is not None:
+                rst_0 = rst_0.to(device=device)
+                if isinstance(rst_1, torch.Tensor):
+                    rst_1 = rst_1.to(device=device)
+                    
             return rst_0, rst_1
 
     @staticmethod
