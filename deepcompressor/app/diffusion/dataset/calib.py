@@ -70,19 +70,21 @@ class DiffusionCalibCacheLoaderConfig(BaseDataLoaderConfig):
 
 
 class DiffusionCalibDataset(DiffusionDataset):
-    data: list[dict[str, tp.Any]]
-
+    # Changed from eager loading to lazy loading to prevent VRAM exhaustion
+    
     def __init__(self, path: str, num_samples: int = -1, seed: int = 0) -> None:
         super().__init__(path, num_samples=num_samples, seed=seed, ext=".pt")
-        data = [torch.load(path) for path in self.filepaths]
-        random.Random(seed).shuffle(data)
-        self.data = data
+        # Shuffle filepaths instead of loading all data
+        shuffled_paths = self.filepaths.copy()
+        random.Random(seed).shuffle(shuffled_paths)
+        self.filepaths = shuffled_paths
 
     def __len__(self) -> int:
-        return len(self.data)
+        return len(self.filepaths)
 
     def __getitem__(self, idx) -> dict[str, tp.Any]:
-        return self.data[idx]
+        # Load on demand instead of from pre-loaded cache
+        return torch.load(self.filepaths[idx], weights_only=False)
 
 
 class DiffusionConcatCacheAction(ConcatCacheAction):
