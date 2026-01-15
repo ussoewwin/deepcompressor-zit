@@ -99,7 +99,7 @@ class ChannelMetric:
     ) -> tuple[torch.Tensor, torch.Tensor | int | float]:
         if isinstance(tensors, torch.Tensor):
             device = device or tensors.device
-            return fn(tensors, num_channels, group_shape, device, dtype)
+            return fn(tensors.to(device=device), num_channels, group_shape, device, dtype)
         else:
             # Optimize for VRAM: Iterative GPU reduction (Split & Clear)
             # Process first item
