@@ -61,14 +61,19 @@ class CollectHook:
             new_args.append(input_kwargs.pop("hidden_states"))
         elif isinstance(module, ZImageTransformer2DModel):
             # ZIT uses 'x' as the main input (list of latent tensors)
+            # Each tensor in list is [16, 1, H, W], list length is batch size
             x = input_kwargs.pop("x")
-            # DEBUG: Force reshape if input is [16, 1, ...] which causes tree_split to shatter it into 16 samples
-            # This handles the case where pipeline produces (Frames=16, C=1) but Weights expect (B=1, C=16)
+            
+            # Stack the list into [B, 16, 1, H, W] so tree_split correctly sees batch dimension
+            # This prevents tree_split from misinterpreting 16 channels as 16 batch samples
             if isinstance(x, list) and len(x) > 0 and torch.is_tensor(x[0]):
-                if x[0].shape[0] == 16 and x[0].shape[1] == 1:
-                    print(f"DEBUG: Reshaping ZIT input {x[0].shape} -> [1, 16, ...]")
-                    x = [t.transpose(0, 1).contiguous() for t in x]
-            new_args.append(x)
+                # x is a list of tensors, each [16, 1, H, W]
+                # Stack to [B, 16, 1, H, W] where B = len(x)
+                x_stacked = torch.stack(x, dim=0)  # [B, 16, 1, H, W]
+                print(f"DEBUG: ZIT CollectHook stacking {len(x)} tensors of shape {x[0].shape} -> {x_stacked.shape}")
+                new_args.append(x_stacked)
+            else:
+                new_args.append(x)
         else:
             raise ValueError(f"Unknown model: {module}")
         cache = tree_map(lambda x: x.cpu(), {"input_args": new_args, "input_kwargs": input_kwargs, "outputs": output})

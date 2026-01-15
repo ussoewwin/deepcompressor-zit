@@ -202,48 +202,6 @@ def build_zit_pipeline(
         return latents
 
     pipe.prepare_latents = types.MethodType(custom_prepare_latents, pipe)
-    
-    # === CRITICAL FIX ===
-    # Wrap embedder to fix shape mismatch (Batch*16, 1) -> (Batch, 16)
-    class ZITPatchEmbedWrapper(torch.nn.Module):
-        def __init__(self, original_embedder):
-            super().__init__()
-            self.original_embedder = original_embedder
-            
-        def forward(self, x):
-            try:
-                import sys
-                # Aggressive debug print with flush
-                print(f"DEBUG: ZITPatchEmbedWrapper input shape: {x.shape}", flush=True)
-                
-                # Detect 1-channel bad input [Batch*16, 1, H, W]
-                # Even if dim/mod check fails, if channel is 1, we suspect it's wrong for ZIT (which needs 16)
-                if x.dim() == 4 and x.shape[1] == 1:
-                    if x.shape[0] % 16 == 0:
-                        print(f"DEBUG: FORCE RESHAPING 1-channel input to 16-channel...", flush=True)
-                        b = x.shape[0] // 16
-                        x = x.view(b, 16, x.shape[2], x.shape[3])
-                        print(f"DEBUG: Reshaped to {x.shape}", flush=True)
-                    else:
-                        print(f"DEBUG: Input has 1 channel but batch {x.shape[0]} not divisible by 16. Skipping.", flush=True)
-            except Exception as e:
-                print(f"DEBUG: Wrapper Error: {e}", flush=True)
-                
-            return self.original_embedder(x)
-        
-        def __getattr__(self, name):
-            try:
-                return super().__getattr__(name)
-            except AttributeError:
-                return getattr(self.original_embedder, name)
 
-    if hasattr(pipe.transformer, "all_x_embedder"):
-        print("DEBUG: Applying ZITPatchEmbedWrapper to transformer.all_x_embedder")
-        for key in pipe.transformer.all_x_embedder.keys():
-            original = pipe.transformer.all_x_embedder[key]
-            # Ensure we don't double-wrap
-            if not isinstance(original, ZITPatchEmbedWrapper):
-                pipe.transformer.all_x_embedder[key] = ZITPatchEmbedWrapper(original)
-
-    print("ZImagePipeline built successfully with T5 encoder, monkeypatched prepare_latents, and PatchEmbedWrapper")
+    print("ZImagePipeline built successfully with T5 encoder and monkeypatched prepare_latents")
     return pipe

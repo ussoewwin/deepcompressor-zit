@@ -190,7 +190,22 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
             batch_size=self.batch_size, shuffle=False, drop_last=True, num_workers=self.config.num_workers
         )
         for data in dataloader:
-            yield ModuleForwardInput(args=data["input_args"], kwargs=data["input_kwargs"])
+            input_args = data["input_args"]
+            input_kwargs = data["input_kwargs"]
+            
+            # ZIT-specific: Convert stacked tensor back to list format
+            # During collection, ZIT data was stacked from list of [16, 1, H, W] to [B, 16, 1, H, W]
+            # Now unstack it back to a list for transformer.forward()
+            if len(input_args) > 0 and torch.is_tensor(input_args[0]):
+                x = input_args[0]
+                # Check if this looks like ZIT stacked format: [B, 16, 1, H, W]
+                if x.dim() == 5 and x.shape[1] == 16 and x.shape[2] == 1:
+                    # Unstack: [B, 16, 1, H, W] -> list of B tensors, each [16, 1, H, W]
+                    x_list = list(x.unbind(dim=0))
+                    input_args = [x_list] + list(input_args[1:])
+                    print(f"DEBUG: ZIT iter_samples unstacking {x.shape} -> list of {len(x_list)} x {x_list[0].shape}")
+            
+            yield ModuleForwardInput(args=input_args, kwargs=input_kwargs)
 
     def _convert_layer_inputs(
         self, m: nn.Module, args: tuple[tp.Any, ...], kwargs: dict[str, tp.Any], save_all: bool = False
