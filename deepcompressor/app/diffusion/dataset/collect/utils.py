@@ -71,12 +71,17 @@ class CollectHook:
                 # Stack to [B, 16, 1, H, W] where B = len(x)
                 x_stacked = torch.stack(x, dim=0)  # [B, 16, 1, H, W]
                 print(f"DEBUG: ZIT CollectHook stacking {len(x)} tensors of shape {x[0].shape} -> {x_stacked.shape}")
+                # Clear original list to free memory
+                x.clear()
+                del x
                 new_args.append(x_stacked)
             else:
                 new_args.append(x)
+            # For ZIT, don't cache outputs to save VRAM (they're huge and regenerated during quantization)
+            output = None
         else:
             raise ValueError(f"Unknown model: {module}")
-        cache = tree_map(lambda x: x.cpu(), {"input_args": new_args, "input_kwargs": input_kwargs, "outputs": output})
+        cache = tree_map(lambda x: x.cpu() if x is not None else None, {"input_args": new_args, "input_kwargs": input_kwargs, "outputs": output})
         split_cache = tree_split(cache)
 
         if isinstance(module, PixArtTransformer2DModel) and self.zero_redundancy:
