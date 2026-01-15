@@ -70,21 +70,19 @@ class DiffusionCalibCacheLoaderConfig(BaseDataLoaderConfig):
 
 
 class DiffusionCalibDataset(DiffusionDataset):
-    # Changed from eager loading to lazy loading to prevent VRAM exhaustion
-    
+    data: list[dict[str, tp.Any]]
+
     def __init__(self, path: str, num_samples: int = -1, seed: int = 0) -> None:
         super().__init__(path, num_samples=num_samples, seed=seed, ext=".pt")
-        # Shuffle filepaths instead of loading all data
-        shuffled_paths = self.filepaths.copy()
-        random.Random(seed).shuffle(shuffled_paths)
-        self.filepaths = shuffled_paths
+        data = [torch.load(path) for path in self.filepaths]
+        random.Random(seed).shuffle(data)
+        self.data = data
 
     def __len__(self) -> int:
-        return len(self.filepaths)
+        return len(self.data)
 
     def __getitem__(self, idx) -> dict[str, tp.Any]:
-        # Load on demand instead of from pre-loaded cache
-        return torch.load(self.filepaths[idx], weights_only=False)
+        return self.data[idx]
 
 
 class DiffusionConcatCacheAction(ConcatCacheAction):
@@ -188,35 +186,11 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
             return super()._init_cache(name, module)
 
     def iter_samples(self) -> tp.Generator[ModuleForwardInput, None, None]:
-        import gc
         dataloader = self.dataset.build_loader(
             batch_size=self.batch_size, shuffle=False, drop_last=True, num_workers=self.config.num_workers
         )
         for data in dataloader:
-            input_args = data["input_args"]
-            input_kwargs = data["input_kwargs"]
-            
-            # ZIT-specific: Convert stacked tensor back to list format
-            # During collection, ZIT data was stacked from list of [16, 1, H, W] to [B, 16, 1, H, W]
-            # Now unstack it back to a list for transformer.forward()
-            if len(input_args) > 0 and torch.is_tensor(input_args[0]):
-                x = input_args[0]
-                # Check if this looks like ZIT stacked format: [B, 16, 1, H, W]
-                if x.dim() == 5 and x.shape[1] == 16 and x.shape[2] == 1:
-                    # Unstack: [B, 16, 1, H, W] -> list of B tensors, each [16, 1, H, W]
-                    # Use clone() to create independent copies, then delete original to free memory
-                    x_list = [t.clone() for t in x.unbind(dim=0)]
-                    del x, input_args
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    input_args = [x_list] + list(data["input_args"][1:])
-                    print(f"DEBUG: ZIT iter_samples unstacking -> list of {len(x_list)} x {x_list[0].shape}")
-            
-            yield ModuleForwardInput(args=input_args, kwargs=input_kwargs)
-            
-            # Clear after yield
-            del data, input_args, input_kwargs
-            gc.collect()
+            yield ModuleForwardInput(args=data["input_args"], kwargs=data["input_kwargs"])
 
     def _convert_layer_inputs(
         self, m: nn.Module, args: tuple[tp.Any, ...], kwargs: dict[str, tp.Any], save_all: bool = False
