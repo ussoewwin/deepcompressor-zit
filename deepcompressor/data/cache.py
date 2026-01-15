@@ -243,6 +243,10 @@ class TensorsCache:
             `ModuleForwardInput`:
                 Module forward input.
         """
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         _args, _kwargs = [], {}
         _kwargs.update(kwargs)
         for key, tensor in self.tensors.items():
