@@ -243,7 +243,7 @@ class TensorsCache:
             `ModuleForwardInput`:
                 Module forward input.
         """
-        """
+
         _args, _kwargs = [], {}
         _kwargs.update(kwargs)
         for key, tensor in self.tensors.items():
