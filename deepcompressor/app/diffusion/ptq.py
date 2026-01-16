@@ -133,6 +133,7 @@ def _process_zit_linear(
         # Try exact match
         s0, s1 = get_raw(name)
         if s0 is not None:
+            if "to_qkv" not in name: return None, s1
             return s0, s1
 
         # Fallback 1: QKV Fusion (to_qkv -> to_q, to_k, to_v)
@@ -235,6 +236,11 @@ def _process_zit_linear(
             if s0 is not None:
                 return s0, s1
 
+        # Z-Image Turbo Constraint: Only to_qkv layers have wcscales (s0)
+        # Force s0 to None for all other layers to match official structure
+        if "to_qkv" not in name:
+            return None, s1
+            
         return None, None
     
     def _get_branch(name: str) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -397,7 +403,7 @@ def _process_zit_linear(
         converted = convert_to_nunchaku_w4x4y16_linear_state_dict(
             weight=weight.to(dtype=torch_dtype, device="cpu"),
             scale=s0.to(device="cpu"),
-            bias=bias.to(dtype=torch_dtype, device="cpu") if bias is not None else None,
+            bias=None, # Force None to match official model structure (no linear bias)
             smooth=smooth.to(device="cpu") if smooth is not None else None,
             lora=branch,
             float_point=float_point,
