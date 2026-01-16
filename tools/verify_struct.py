@@ -11,15 +11,13 @@ def verify_struct_registration():
     print("Verifying ZImageTransformerStruct registration...")
     
     # Check if ZImageTransformer2DModel is in the _factories dict of DiffusionModelStruct
-    factories = DiffusionModelStruct._factories.get(ZImageTransformer2DModel, [])
+    factory = DiffusionModelStruct._factories.get(ZImageTransformer2DModel, None)
     
     is_registered = False
-    for factory in factories:
-        # Check if the factory function belongs to ZImageTransformerStruct
-        # Note: factory is usually a bound method or function
-        if factory == ZImageTransformerStruct._default_construct:
+    if factory:
+        # Check if the factory function is one of our constructors
+        if factory == ZImageTransformerStruct._default_construct or factory == ZImageTransformerStruct._construct_direct:
             is_registered = True
-            break
             
     if is_registered:
         print("SUCCESS: ZImageTransformerStruct is correctly registered.")
