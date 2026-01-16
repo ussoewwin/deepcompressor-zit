@@ -1,0 +1,47 @@
+origin	https://github.com/nunchaku-tech/deepcompressor.git (fetch)
+origin	https://github.com/nunchaku-tech/deepcompressor.git (push)
+user-remote	https://github.com/ussoewwin/deepcompressor-zit (fetch)
+user-remote	https://github.com/ussoewwin/deepcompressor-zit (push)
+diff.astextplain.textconv=astextplain
+filter.lfs.clean=git-lfs clean -- %f
+filter.lfs.smudge=git-lfs smudge -- %f
+filter.lfs.process=git-lfs filter-process
+filter.lfs.required=true
+http.sslbackend=openssl
+http.sslcainfo=C:/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt
+core.autocrlf=true
+core.fscache=true
+core.symlinks=true
+pull.rebase=false
+credential.helper=manager
+credential.https://dev.azure.com.usehttppath=true
+init.defaultbranch=main
+core.editor="C:\Users\ussoe\AppData\Local\Programs\Microsoft VS Code\bin\code" --wait
+core.longpaths=true
+filter.lfs.clean=git-lfs clean -- %f
+filter.lfs.smudge=git-lfs smudge -- %f
+filter.lfs.process=git-lfs filter-process
+filter.lfs.required=true
+user.name=Your Name
+user.email=your@email.com
+user.signingkey=3C17699C28BCB09FCCE8E6503BBD0C7087B87195
+safe.directory=D:/xformers/xformers
+safe.directory=D:/xformers
+safe.directory=D:/USERFILES/ComfyUI/ComfyUI/custom_nodes/image_resize_comfyui
+credential.https://huggingface.co.provider=generic
+commit.gpgsign=false
+gpg.program=C:/Program Files (x86)/GnuPG/bin/gpg.exe
+credential.helper=manager
+core.repositoryformatversion=0
+core.filemode=false
+core.bare=false
+core.logallrefupdates=true
+core.ignorecase=true
+remote.origin.url=https://github.com/nunchaku-tech/deepcompressor.git
+remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*
+branch.main.remote=origin
+branch.main.merge=refs/heads/main
+branch.main.vscode-merge-base=origin/main
+branch.zit-quantization.vscode-merge-base=origin/main
+remote.user-remote.url=https://github.com/ussoewwin/deepcompressor-zit
+remote.user-remote.fetch=+refs/heads/*:refs/remotes/user-remote/*

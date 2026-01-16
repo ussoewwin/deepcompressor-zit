@@ -6,6 +6,16 @@ Based on the official svdq-fp4_r128-z-image-turbo.safetensors structure.
 import gc
 import json
 import os
+import sys
+
+# Force local deepcompressor package to be used (Fix for Environment/Import issues)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
+# Explicitly import ZImageTransformerStruct to ensure factory registration
+try:
+    from .nn.struct import ZImageTransformerStruct
+except ImportError:
+    pass # Might fail if relative import issues, but path hack should fix global import
+
 import pprint
 import traceback
 
@@ -404,6 +414,10 @@ def _process_zit_linear(
             subscale=s1.to(device="cpu") if s1 is not None else None,
         )
         
+        # Rename wscales to wtscale for non-qkv (Official model convention)
+        if "to_qkv" not in module_name and "wscales" in converted:
+            converted["wtscale"] = converted.pop("wscales")
+
         # Rename to match Nunchaku naming
         if "lora_down" in converted:
             converted["proj_down"] = converted.pop("lora_down")

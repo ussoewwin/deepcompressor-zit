@@ -1,0 +1,59 @@
+69edb57 Fix TypeError in verify_struct.py
+bc3c121 Update run_quantize_zit.ps1 to use venv python
+7921efc Fix ZImageTransformerStruct registration and mapping with context/noise refiners
+1fb8ef8 Implement ZIT quantization reforms: Struct registration fix, new SVDQ config, and automated verification.
+357125d Use try-except for factory registration to prevent re-import crash
+cf774de Fix duplicate factory registration in struct.py
+202b934 CRITICAL: Register ZImageTransformerStruct factory to DiffusionModelStruct
+91da383 CRITICAL FIX: Restore quantization for all layers and fix wcscales handling
+27c071b Fix export logic to suppress bias and restrict wcscales to QKV
+ddd4685 Fix quantization coverage: Add ZImageTransformerStruct to include refiner layers
+d0ccb1c Fix export: expand scalar scales to match output channels (fix AssertionError)
+bec50c7 Fix export: fix NameError (add smooth_cache arg) and SyntaxError (remove duplicate args)
+0f49765 Fix export: robust scale retrieval with key mapping and fusion for QKV/FFN
+35cd645 Fix export: pass smooth_cache, fix key mapping for QKV smooth scales, convert orig_state to Diffusers format
+86016a7 Critical Fix: Convert orig_state to Diffusers format in export to match quantized keys
+3d42f6f Fix: Add missing gc import
+d45b31d Fix ZIT export: key conversion matches official format, already-fused QKV handling
+78f5c5e Critical VRAM Fix: Always honor config.outputs_device (port dfcd7c4)
+e743c07 Fundamental VRAM Fix: Force CPU load for calibration data + GC between layers
+daa249d Fix Freeze: Switch smoothing strategy to Manual to avoid massive search overhead
+0d0c861 Fix VRAM: Enable CPU offloading for calibration outputs in config
+c63dd83 Fix Syntax: Remove duplicate docstring quotes
+b057032 Fix Performance: Remove aggressive GC from cache.extract to prevent loop freeze
+85ad8ab Optimize Speed: Force input transfer to GPU in ChannelMetric._max_reduce
+35260a0 Optimize Speed & VRAM: Revert CPU force, implement iterative GPU reduction with explicit clear
+1126a19 Optimize VRAM: Force calibration search outputs to CPU
+ed23832 Fix Critical VRAM Leak: Force CPU offloading for golden outputs in SearchBasedCalibrator
+025871c Optimize VRAM: Force CPU aggregation in ChannelMetric to prevent OOM/Freeze during smoothing
+53f0669 Optimize VRAM: Add aggressive gc in TensorsCache.extract to prevent saturation during smoothing
+9f9772d Apply OOM fix to quantization loader: Add CPU detach for args/kwargs in calib.py
+4d474e9 Revert calibration code changes - keep original stacking only
+685161c CRITICAL FIX: Add CPU detach for kwargs/args to prevent OOM during activation collection - root cause of 80GB exhaustion
+082856f ZIT: Don't cache outputs, clear original list after stacking to save VRAM
+b76289d Fix memory leak: clone after unbind and explicit gc to free stacked tensor
+f3c084f Fix VRAM exhaustion: lazy load calibration samples instead of preloading all 128
+c54e559 Fix ZIT calibration: stack/unstack list format for correct batch dimension handling
+d316d0b Aggressive reshape fallback for 1-channel inputs
+cb70977 Add debug print and relax condition in wrapper
+5715342 Fix RecursionError in ZITPatchEmbedWrapper __getattr__
+4b3a88c Delete run_quantize_zit.py as requested
+85889c7 Revert run_quantize_zit.py to user version
+bc67baf Add patch verification to run_quantize_zit.py
+d41221b Update run_quantize_zit.py with user provided robust script
+1df9e0c Delete dump_source.py as requested
+a804a64 Force apply ZITPatchEmbedWrapper to fix shape mismatch in ZIT pipeline
+c4962f8 Add dump_source.py correctly
+5f200cf Fix CollectHook to reshape ZIT inputs [16, 1] -> [1, 16] to prevent incorrect batch splitting
+fa65f18 Add debug print to config.py to verify builder invocation
+417a543 Monkeypatch ZImagePipeline.prepare_latents to force 16 channels
+38af39a Fix scripts to force 16-channel calibration
+* main
+  zit-quantization
+  remotes/origin/HEAD -> origin/main
+  remotes/origin/deepcompressor-v0.2.0
+  remotes/origin/deepcompressor-v0.3.0
+  remotes/origin/lmquant-v0.0.0
+  remotes/origin/main
+  remotes/user-remote/main
+  remotes/user-remote/zit-quantization

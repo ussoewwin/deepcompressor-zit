@@ -1,0 +1,59 @@
+Verifying Generated Model: D:\nu\z_image_turbo-r128-svdq-fp4.safetensors
+Against Official Model:  D:\nu\svdq-fp4_r128-z-image-turbo.safetensors
+Loading models metadata...
+Generated Keys: 989
+Official Keys:  1235
+
+[CRITICAL] Missing Keys in Generated Model (382):
+  - context_refiner.0.attention.to_out.0.proj_down
+  - context_refiner.0.attention.to_out.0.proj_up
+  - context_refiner.0.attention.to_out.0.qweight
+  - context_refiner.0.attention.to_out.0.smooth_factor
+  - context_refiner.0.attention.to_out.0.smooth_factor_orig
+  - context_refiner.0.attention.to_out.0.wscales
+  - context_refiner.0.attention.to_out.0.wtscale
+  - context_refiner.0.attention.to_qkv.proj_down
+  - context_refiner.0.attention.to_qkv.proj_up
+  - context_refiner.0.attention.to_qkv.qweight
+  - context_refiner.0.attention.to_qkv.smooth_factor
+  - context_refiner.0.attention.to_qkv.smooth_factor_orig
+  - context_refiner.0.attention.to_qkv.wcscales
+  - context_refiner.0.attention.to_qkv.wscales
+  - context_refiner.0.feed_forward.net.0.proj.proj_down
+  - context_refiner.0.feed_forward.net.0.proj.proj_up
+  - context_refiner.0.feed_forward.net.0.proj.qweight
+  - context_refiner.0.feed_forward.net.0.proj.smooth_factor
+  - context_refiner.0.feed_forward.net.0.proj.smooth_factor_orig
+  - context_refiner.0.feed_forward.net.0.proj.wscales
+  ... and 362 more
+
+[WARNING] Extra Keys in Generated Model (136):
+  + context_refiner.0.attention.to_out.0.weight
+  + context_refiner.0.attention.to_qkv.weight
+  + context_refiner.0.feed_forward.net.0.proj.weight
+  + context_refiner.0.feed_forward.net.2.weight
+  + context_refiner.1.attention.to_out.0.weight
+  + context_refiner.1.attention.to_qkv.weight
+  + context_refiner.1.feed_forward.net.0.proj.weight
+  + context_refiner.1.feed_forward.net.2.weight
+  + layers.0.attention.to_out.0.bias
+  + layers.0.attention.to_qkv.bias
+  + layers.0.feed_forward.net.0.proj.bias
+  + layers.0.feed_forward.net.2.bias
+  + layers.1.attention.to_out.0.bias
+  + layers.1.attention.to_qkv.bias
+  + layers.1.feed_forward.net.0.proj.bias
+  + layers.1.feed_forward.net.2.bias
+  + layers.10.attention.to_out.0.bias
+  + layers.10.attention.to_qkv.bias
+  + layers.10.feed_forward.net.0.proj.bias
+  + layers.10.feed_forward.net.2.bias
+  ... and 116 more
+
+[OK] All common tensors match shape and dtype.
+
+[ANALYSIS] Refiner layers are MISSING. Struct registration failed.
+
+[ANALYSIS] SVD Low-Rank branches are MISSING. SVD decomposition failed.
+
+[ANALYSIS] Quantization Scales are MISSING. Quantization logic failed.
