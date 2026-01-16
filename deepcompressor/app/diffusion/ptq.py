@@ -319,10 +319,7 @@ def _zit_export_to_nunchaku_single_safetensors(
     logger.info(f"* Exporting Nunchaku Z-Image Turbo: processing {len(all_layers)} layers")
     
     for layer_prefix in all_layers:
-        # QKV fusion: attention.to_q/to_k/to_v -> attention.to_qkv
-        q_name = f"{layer_prefix}.attention.to_q"
-        k_name = f"{layer_prefix}.attention.to_k"
-        v_name = f"{layer_prefix}.attention.to_v"
+        # QKV: attention.to_qkv (already fused from DiffSynth conversion)
         qkv_name = f"{layer_prefix}.attention.to_qkv"
         
         _process_zit_linear(
@@ -335,8 +332,8 @@ def _zit_export_to_nunchaku_single_safetensors(
             rank=rank,
             torch_dtype=torch_dtype,
             float_point=float_point,
-            is_qkv_fused=True,
-            qkv_modules=[q_name, k_name, v_name],
+            is_qkv_fused=False,  # Already fused, process as single linear
+            qkv_modules=None,
         )
         
         # attention.to_out.0

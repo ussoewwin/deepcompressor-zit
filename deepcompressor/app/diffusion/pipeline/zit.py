@@ -16,37 +16,42 @@ __all__ = ["load_zit_transformer", "build_zit_pipeline", "convert_diffsynth_to_d
 
 
 def convert_diffsynth_to_diffusers(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Convert DiffSynth-format state dict to Diffusers format.
+    """Convert DiffSynth-format state dict to Diffusers/Nunchaku format.
     
-    DiffSynth uses fused QKV weights and different naming conventions.
-    Diffusers uses separated Q, K, V weights.
+    Key mappings based on official svdq-fp4_r128-z-image-turbo.safetensors:
+    - attention.qkv -> attention.to_qkv (keep fused, don't split)
+    - attention.out -> attention.to_out.0
+    - attention.q_norm -> attention.norm_q
+    - attention.k_norm -> attention.norm_k
+    - feed_forward.w1 + w3 -> feed_forward.net.0.proj (fused gate+up projection)
+    - feed_forward.w2 -> feed_forward.net.2
     """
     new_state_dict = {}
     
+    # First pass: collect w1 and w3 for fusion
+    w1_tensors = {}  # layer_prefix -> tensor
+    w3_tensors = {}  # layer_prefix -> tensor
+    
     for key, value in state_dict.items():
-        new_key = key
-        
-        # Key renaming patterns
-        # attention.qkv -> split into to_q, to_k, to_v
-        if ".attention.qkv.weight" in key:
-            # Split fused QKV into separate Q, K, V
-            # QKV is concatenated as [Q, K, V] where each has same size
-            # Total out_features = 3 * hidden_size, so each part = total / 3
-            total_out = value.shape[0]
-            chunk_size = total_out // 3
+        # Collect w1 and w3 for later fusion
+        match = re.match(r"(.+)\.feed_forward\.w1\.weight", key)
+        if match:
+            w1_tensors[match.group(1)] = value
+            continue
             
-            q = value[:chunk_size, :]
-            k = value[chunk_size:chunk_size*2, :]
-            v = value[chunk_size*2:, :]
-            
-            base_key = key.replace(".attention.qkv.weight", ".attention")
-            new_state_dict[f"{base_key}.to_q.weight"] = q
-            new_state_dict[f"{base_key}.to_k.weight"] = k
-            new_state_dict[f"{base_key}.to_v.weight"] = v
+        match = re.match(r"(.+)\.feed_forward\.w3\.weight", key)
+        if match:
+            w3_tensors[match.group(1)] = value
             continue
         
+        new_key = key
+        
+        # attention.qkv -> attention.to_qkv (keep fused for Nunchaku)
+        if ".attention.qkv.weight" in key:
+            new_key = key.replace(".attention.qkv.weight", ".attention.to_qkv.weight")
+        
         # attention.out -> attention.to_out.0
-        if ".attention.out.weight" in key:
+        elif ".attention.out.weight" in key:
             new_key = key.replace(".attention.out.weight", ".attention.to_out.0.weight")
         
         # attention.q_norm -> attention.norm_q
@@ -57,6 +62,10 @@ def convert_diffsynth_to_diffusers(state_dict: dict[str, torch.Tensor]) -> dict[
         elif ".attention.k_norm.weight" in key:
             new_key = key.replace(".attention.k_norm.weight", ".attention.norm_k.weight")
         
+        # feed_forward.w2 -> feed_forward.net.2
+        elif ".feed_forward.w2.weight" in key:
+            new_key = key.replace(".feed_forward.w2.weight", ".feed_forward.net.2.weight")
+        
         # x_embedder -> all_x_embedder.2-1
         elif key.startswith("x_embedder."):
             new_key = key.replace("x_embedder.", "all_x_embedder.2-1.")
@@ -65,9 +74,24 @@ def convert_diffsynth_to_diffusers(state_dict: dict[str, torch.Tensor]) -> dict[
         elif key.startswith("final_layer."):
             new_key = key.replace("final_layer.", "all_final_layer.2-1.")
         
-        # x_pad_token stay as is
-        
         new_state_dict[new_key] = value
+    
+    # Second pass: fuse w1 and w3 into net.0.proj
+    # The official model concatenates them as [w1; w3] along dimension 0
+    for layer_prefix in w1_tensors:
+        w1 = w1_tensors[layer_prefix]
+        w3 = w3_tensors.get(layer_prefix)
+        if w3 is not None:
+            # Fuse w1 and w3: concatenate along output dimension
+            # w1: [10240, 3840], w3: [10240, 3840] -> fused: [20480, 3840]
+            fused = torch.cat([w1, w3], dim=0)
+            new_key = f"{layer_prefix}.feed_forward.net.0.proj.weight"
+            new_state_dict[new_key] = fused
+        else:
+            # w3 not found, just use w1 with warning
+            print(f"Warning: w3 not found for {layer_prefix}, using w1 only")
+            new_key = f"{layer_prefix}.feed_forward.net.0.proj.weight"
+            new_state_dict[new_key] = w1
     
     return new_state_dict
 
