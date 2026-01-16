@@ -2014,6 +2014,14 @@ class ZImageTransformerStruct(DiffusionTransformerStruct):
     
     context_refiner_rkey: tp.ClassVar[str] = "context_refiner"
     noise_refiner_rkey: tp.ClassVar[str] = "noise_refiner"
+    
+    @property
+    def context_refiner_names(self) -> list[str]:
+        return [f"context_refiner.{i}" for i in range(len(self.context_refiner_blocks))]
+
+    @property
+    def noise_refiner_names(self) -> list[str]:
+        return [f"noise_refiner.{i}" for i in range(len(self.noise_refiner_blocks))]
 
     def __post_init__(self):
         super().__post_init__()
@@ -2105,9 +2113,34 @@ class ZImageTransformerStruct(DiffusionTransformerStruct):
         return key_map
 
 
+    @classmethod
+    def _construct_direct(cls, module: nn.Module, /, **kwargs) -> "ZImageTransformerStruct":
+        """Construct the struct directly without factory lookup or default logic."""
+        # Mapping based on ZImageTransformer2DModel attributes
+        return cls(
+            module=module,
+            norm_in=None,  # Not present in ZIT top level
+            proj_in=getattr(module, "all_x_embedder", None),
+            norm_in_rname="",
+            proj_in_rname="all_x_embedder" if hasattr(module, "all_x_embedder") else "",
+            
+            norm_out=getattr(module, "all_final_layer", None),
+            proj_out=None, # all_final_layer usually includes projection
+            norm_out_rname="all_final_layer" if hasattr(module, "all_final_layer") else "",
+            proj_out_rname="",
+
+            transformer_blocks=list(module.layers),
+            transformer_blocks_rname="layers",
+            
+            context_refiner_blocks=list(module.context_refiner),
+            noise_refiner_blocks=list(module.noise_refiner),
+            
+            **kwargs
+        )
+
+
 # Register ZImageTransformerStruct factory to DiffusionModelStruct so DiffusionModelStruct.construct() finds it
-# Use try-except to avoid duplication error on re-import
-try:
-    DiffusionModelStruct.register_factory(ZImageTransformer2DModel, ZImageTransformerStruct._default_construct)
-except AssertionError:
-    pass
+# Force register/overwrite ZImageTransformerStruct factory to DiffusionModelStruct
+# We access the private _factories dict directly to ensure we overwrite any potential incorrect existing entry
+DiffusionModelStruct._factories[ZImageTransformer2DModel] = ZImageTransformerStruct._construct_direct
+# print(f"DEBUG: Explicitly registered ZImageTransformer2DModel factory: {DiffusionModelStruct._factories[ZImageTransformer2DModel]}")
