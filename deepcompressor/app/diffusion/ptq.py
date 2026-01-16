@@ -104,6 +104,7 @@ def _process_zit_linear(
     branch_state: dict[str, dict[str, torch.Tensor]] | None,
     smooth_cache: dict[str, torch.Tensor] | None,
     out_state: dict[str, torch.Tensor],
+    config: object | None = None,
     rank: int,
     torch_dtype: torch.dtype,
     float_point: bool,
@@ -120,6 +121,13 @@ def _process_zit_linear(
                 s0 = torch.tensor([float(s0)], dtype=torch_dtype, device="cpu")
             if s1 is not None and not isinstance(s1, torch.Tensor):
                 s1 = torch.tensor([float(s1)], dtype=torch_dtype, device="cpu")
+            # Normalize to 4D [C, 1, G, 1] or [C, 1, 1, 1]
+            if s0 is not None:
+                if s0.ndim == 0: s0 = s0.view(1, 1, 1, 1)
+                elif s0.ndim == 1: s0 = s0.view(-1, 1, 1, 1)
+            if s1 is not None:
+                if s1.ndim == 0: s1 = s1.view(1, 1, 1, 1)
+                elif s1.ndim == 1: s1 = s1.view(-1, 1, 1, 1)
             return s0, s1
 
         # Try exact match
@@ -138,19 +146,46 @@ def _process_zit_linear(
             vs0, vs1 = get_raw(v_name)
             
             if qs0 is not None and ks0 is not None and vs0 is not None:
-                # Fuse scales: concat dim 0 (output channel)
-                # Ensure they are 1D or correct shape for concat
-                if qs0.ndim == 0: qs0 = qs0.unsqueeze(0)
-                if ks0.ndim == 0: ks0 = ks0.unsqueeze(0)
-                if vs0.ndim == 0: vs0 = vs0.unsqueeze(0)
+                # Need to expand scales to match output channels
+                # Standard scalar scale is [1, 1, 1, 1]
+                # We need [Q_OC, 1, 1, 1] etc.
+                
+                q_oc, k_oc, v_oc = 0, 0, 0
+                if config:
+                    head_dim = getattr(config, "attention_head_dim", 64)
+                    q_heads = getattr(config, "num_attention_heads", 0)
+                    kv_heads = getattr(config, "num_key_value_heads", q_heads)
+                    if kv_heads is None: kv_heads = q_heads
+                    
+                    q_oc = head_dim * q_heads
+                    k_oc = head_dim * kv_heads
+                    v_oc = head_dim * kv_heads
+                
+                # If config failed or 0, try to infer from orig_state (assuming equal split)
+                if q_oc == 0:
+                     fused_w = orig_state.get(f"{name}.weight")
+                     if fused_w is not None:
+                         total_oc = fused_w.shape[0]
+                         q_oc = k_oc = v_oc = total_oc // 3
+                
+                def expand(s, size):
+                    if s is None: return None
+                    if s.shape[0] == 1 and size > 1:
+                        return s.expand(size, -1, -1, -1).clone()
+                    return s
+
+                qs0 = expand(qs0, q_oc)
+                ks0 = expand(ks0, k_oc)
+                vs0 = expand(vs0, v_oc)
+                
+                qs1 = expand(qs1, q_oc)
+                ks1 = expand(ks1, k_oc)
+                vs1 = expand(vs1, v_oc)
 
                 s0 = torch.cat([qs0, ks0, vs0], dim=0)
                 
                 s1 = None
                 if qs1 is not None and ks1 is not None and vs1 is not None:
-                    if qs1.ndim == 0: qs1 = qs1.unsqueeze(0)
-                    if ks1.ndim == 0: ks1 = ks1.unsqueeze(0)
-                    if vs1.ndim == 0: vs1 = vs1.unsqueeze(0)
                     s1 = torch.cat([qs1, ks1, vs1], dim=0)
                 return s0, s1
 
@@ -168,14 +203,28 @@ def _process_zit_linear(
                     w3s0 = w1s0.clone()
                     if w1s1 is not None: w3s1 = w1s1.clone()
                 
-                if w1s0.ndim == 0: w1s0 = w1s0.unsqueeze(0)
-                if w3s0.ndim == 0: w3s0 = w3s0.unsqueeze(0)
+                # Expand
+                w1_oc, w3_oc = 0, 0
+                fused_w = orig_state.get(f"{name}.weight")
+                if fused_w is not None:
+                    total_oc = fused_w.shape[0]
+                    w1_oc = w3_oc = total_oc // 2
+                
+                def expand(s, size):
+                    if s is None: return None
+                    if s.shape[0] == 1 and size > 1:
+                        return s.expand(size, -1, -1, -1).clone()
+                    return s
+                
+                w1s0 = expand(w1s0, w1_oc)
+                w3s0 = expand(w3s0, w3_oc)
+                w1s1 = expand(w1s1, w1_oc)
+                w3s1 = expand(w3s1, w3_oc)
+
                 s0 = torch.cat([w1s0, w3s0], dim=0)
                 
                 s1 = None
                 if w1s1 is not None and w3s1 is not None:
-                    if w1s1.ndim == 0: w1s1 = w1s1.unsqueeze(0)
-                    if w3s1.ndim == 0: w3s1 = w3s1.unsqueeze(0)
                     s1 = torch.cat([w1s1, w3s1], dim=0)
                 return s0, s1
 
@@ -438,6 +487,7 @@ def _zit_export_to_nunchaku_single_safetensors(
             branch_state=branch_state,
             smooth_cache=smooth_cache,
             out_state=out_state,
+            config=transformer.config,
             rank=rank,
             torch_dtype=torch_dtype,
             float_point=float_point,
@@ -454,6 +504,7 @@ def _zit_export_to_nunchaku_single_safetensors(
             branch_state=branch_state,
             smooth_cache=smooth_cache,
             out_state=out_state,
+            config=transformer.config,
             rank=rank,
             torch_dtype=torch_dtype,
             float_point=float_point,
@@ -468,6 +519,7 @@ def _zit_export_to_nunchaku_single_safetensors(
             branch_state=branch_state,
             smooth_cache=smooth_cache,
             out_state=out_state,
+            config=transformer.config,
             rank=rank,
             torch_dtype=torch_dtype,
             float_point=float_point,
@@ -482,6 +534,7 @@ def _zit_export_to_nunchaku_single_safetensors(
             branch_state=branch_state,
             smooth_cache=smooth_cache,
             out_state=out_state,
+            config=transformer.config,
             rank=rank,
             torch_dtype=torch_dtype,
             float_point=float_point,
