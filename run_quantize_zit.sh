@@ -13,9 +13,21 @@ source venv/bin/activate
 export PYTHONPATH="$(pwd)"
 export XFORMERS_DISABLED=1
 
+echo "=== Running Pre-flight Verification ==="
+python tools/verify_struct.py
+if [ $? -ne 0 ]; then
+    echo "CRITICAL FAILURE: Struct verification failed. Aborting."
+    exit 1
+fi
+
+python tools/verify_config.py examples/diffusion/configs/svdquant/svdq-fp4-r128.yaml
+if [ $? -ne 0 ]; then
+    echo "CRITICAL FAILURE: Config verification failed. Aborting."
+    exit 1
+fi
+echo "=== Verification Passed ==="
+
 echo "=== Cleaning up previous cache files ==="
-rm -rf datasets
-rm -rf jobs
 
 echo "=== Starting ZIT Quantization (PTQ) ==="
 
