@@ -2104,5 +2104,10 @@ class ZImageTransformerStruct(DiffusionTransformerStruct):
                         key_map[root_rkey].add(key)
         return key_map
 
+
 # Register ZImageTransformerStruct factory to DiffusionModelStruct so DiffusionModelStruct.construct() finds it
-DiffusionModelStruct.register_factory(ZImageTransformer2DModel, ZImageTransformerStruct._default_construct)
+# Use try-except to avoid duplication error on re-import
+try:
+    DiffusionModelStruct.register_factory(ZImageTransformer2DModel, ZImageTransformerStruct._default_construct)
+except AssertionError:
+    pass
