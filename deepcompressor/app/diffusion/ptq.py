@@ -131,7 +131,22 @@ def _process_zit_linear(
         return b["a.weight"], b["b.weight"]
     
     def _get_smooth(name: str) -> torch.Tensor | None:
-        # Check for smooth factor in dequant state
+        # Check smooth_cache first (contains smooth scales from smoothing phase)
+        if smooth_cache:
+            # Try exact match first
+            if name in smooth_cache:
+                return smooth_cache[name]
+            # For QKV: smooth_cache uses q_proj name (to_q), but export uses to_qkv
+            # Try mapping to_qkv -> to_q
+            if ".to_qkv" in name:
+                q_name = name.replace(".to_qkv", ".to_q")
+                if q_name in smooth_cache:
+                    return smooth_cache[q_name]
+            # For FFN net.0.proj, try finding the corresponding key  
+            if ".feed_forward.net.0.proj" in name:
+                # This is fused w1+w3, smooth might be under different name
+                pass
+        # Fallback: check for smooth factor in dequant state
         smooth_key = f"{name}.smooth_factor"
         if smooth_key in dequant_state:
             return dequant_state[smooth_key]
@@ -283,6 +298,7 @@ def _zit_export_to_nunchaku_single_safetensors(
     dequant_state: dict[str, torch.Tensor],
     scale_state: dict[str, torch.Tensor],
     branch_state: dict[str, dict[str, torch.Tensor]] | None,
+    smooth_cache: dict[str, torch.Tensor] | None,
     rank: int,
     precision: str,
     torch_dtype: torch.dtype,
@@ -442,6 +458,7 @@ def ptq(
         save_model = False
 
     # Smooth quantization
+    smooth_cache = {}  # Initialize for later use in export
     if quant and config.enabled_smooth:
         logger.info("* Smoothing model for quantization")
         tools.logging.Formatter.indent_inc()
@@ -461,7 +478,7 @@ def ptq(
                 logger.info(f"- Saving smooth scales to {cache.path.smooth}")
                 os.makedirs(cache.dirpath.smooth, exist_ok=True)
                 torch.save(smooth_cache, cache.path.smooth)
-        del smooth_cache
+        # NOTE: Do NOT delete smooth_cache here - needed for export
         tools.logging.Formatter.indent_dec()
         gc.collect()
         torch.cuda.empty_cache()
@@ -529,6 +546,7 @@ def ptq(
                 dequant_state=dequant_state,
                 scale_state=scale_state_dict,
                 branch_state=branch_state_dict,
+                smooth_cache=smooth_cache,
                 rank=rank_val,
                 precision=precision_val,
                 torch_dtype=dtype_val,
