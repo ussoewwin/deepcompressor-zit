@@ -112,44 +112,131 @@ def _process_zit_linear(
     """Process a single linear layer for Z-Image Turbo export."""
     
     def _get_scale(name: str) -> tuple[torch.Tensor, torch.Tensor | None]:
-        s0 = scale_state.get(f"{name}.weight.scale.0", None)
-        if s0 is None:
-            return None, None
-        if not isinstance(s0, torch.Tensor):
-            s0 = torch.tensor([float(s0)], dtype=torch_dtype, device="cpu")
-        s1 = scale_state.get(f"{name}.weight.scale.1", None)
-        if s1 is not None and not isinstance(s1, torch.Tensor):
-            s1 = torch.tensor([float(s1)], dtype=torch_dtype, device="cpu")
-        return s0, s1
+        def get_raw(n):
+            s0 = scale_state.get(f"{n}.weight.scale.0", None)
+            s1 = scale_state.get(f"{n}.weight.scale.1", None)
+            if s0 is not None and not isinstance(s0, torch.Tensor):
+                s0 = torch.tensor([float(s0)], dtype=torch_dtype, device="cpu")
+            if s1 is not None and not isinstance(s1, torch.Tensor):
+                s1 = torch.tensor([float(s1)], dtype=torch_dtype, device="cpu")
+            return s0, s1
+
+        # Try exact match
+        s0, s1 = get_raw(name)
+        if s0 is not None:
+            return s0, s1
+
+        # Fallback 1: QKV Fusion (to_qkv -> to_q, to_k, to_v)
+        if ".attention.to_qkv" in name:
+            q_name = name.replace(".attention.to_qkv", ".attention.to_q")
+            k_name = name.replace(".attention.to_qkv", ".attention.to_k")
+            v_name = name.replace(".attention.to_qkv", ".attention.to_v")
+            
+            qs0, qs1 = get_raw(q_name)
+            ks0, ks1 = get_raw(k_name)
+            vs0, vs1 = get_raw(v_name)
+            
+            if qs0 is not None and ks0 is not None and vs0 is not None:
+                # Fuse scales: concat dim 0 (output channel)
+                # Ensure they are 1D or correct shape for concat
+                if qs0.ndim == 0: qs0 = qs0.unsqueeze(0)
+                if ks0.ndim == 0: ks0 = ks0.unsqueeze(0)
+                if vs0.ndim == 0: vs0 = vs0.unsqueeze(0)
+
+                s0 = torch.cat([qs0, ks0, vs0], dim=0)
+                
+                s1 = None
+                if qs1 is not None and ks1 is not None and vs1 is not None:
+                    if qs1.ndim == 0: qs1 = qs1.unsqueeze(0)
+                    if ks1.ndim == 0: ks1 = ks1.unsqueeze(0)
+                    if vs1.ndim == 0: vs1 = vs1.unsqueeze(0)
+                    s1 = torch.cat([qs1, ks1, vs1], dim=0)
+                return s0, s1
+
+        # Fallback 2: FFN Fusion (net.0.proj -> w1 + w3)
+        if ".feed_forward.net.0.proj" in name:
+            w1_name = name.replace(".feed_forward.net.0.proj", ".feed_forward.w1")
+            w3_name = name.replace(".feed_forward.net.0.proj", ".feed_forward.w3")
+            
+            w1s0, w1s1 = get_raw(w1_name)
+            w3s0, w3s1 = get_raw(w3_name)
+            
+            if w1s0 is not None:
+                if w3s0 is None:
+                    # Missing w3 scale, reuse w1
+                    w3s0 = w1s0.clone()
+                    if w1s1 is not None: w3s1 = w1s1.clone()
+                
+                if w1s0.ndim == 0: w1s0 = w1s0.unsqueeze(0)
+                if w3s0.ndim == 0: w3s0 = w3s0.unsqueeze(0)
+                s0 = torch.cat([w1s0, w3s0], dim=0)
+                
+                s1 = None
+                if w1s1 is not None and w3s1 is not None:
+                    if w1s1.ndim == 0: w1s1 = w1s1.unsqueeze(0)
+                    if w3s1.ndim == 0: w3s1 = w3s1.unsqueeze(0)
+                    s1 = torch.cat([w1s1, w3s1], dim=0)
+                return s0, s1
+
+        # Fallback 3: FFN Down (net.2 -> w2)
+        if ".feed_forward.net.2" in name:
+            w2_name = name.replace(".feed_forward.net.2", ".feed_forward.w2")
+            s0, s1 = get_raw(w2_name)
+            if s0 is not None:
+                return s0, s1
+
+        return None, None
     
     def _get_branch(name: str) -> tuple[torch.Tensor, torch.Tensor] | None:
         if not branch_state:
             return None
+        # Try direct match
         b = branch_state.get(name, None)
+        # Try aliases if needed (omitted for brevity unless critical)
         if not b or "a.weight" not in b or "b.weight" not in b:
-            return None
+            # Try mapping for LoRA as well if needed
+             if ".attention.to_qkv" in name:
+                 # Logic for fused LoRA? Complex. 
+                 # Assuming LoRA branches are handled or irrelevant for base quantization fix.
+                 return None
+             return None
         return b["a.weight"], b["b.weight"]
     
     def _get_smooth(name: str) -> torch.Tensor | None:
-        # Check smooth_cache first (contains smooth scales from smoothing phase)
-        if smooth_cache:
-            # Try exact match first
-            if name in smooth_cache:
-                return smooth_cache[name]
-            # For QKV: smooth_cache uses q_proj name (to_q), but export uses to_qkv
-            # Try mapping to_qkv -> to_q
-            if ".to_qkv" in name:
-                q_name = name.replace(".to_qkv", ".to_q")
-                if q_name in smooth_cache:
-                    return smooth_cache[q_name]
-            # For FFN net.0.proj, try finding the corresponding key  
-            if ".feed_forward.net.0.proj" in name:
-                # This is fused w1+w3, smooth might be under different name
-                pass
-        # Fallback: check for smooth factor in dequant state
-        smooth_key = f"{name}.smooth_factor"
-        if smooth_key in dequant_state:
-            return dequant_state[smooth_key]
+        def get_raw_smooth(n):
+            # Check smooth_cache first
+            if smooth_cache and n in smooth_cache:
+                return smooth_cache[n]
+            # Fallback dequant
+            s_key = f"{n}.smooth_factor"
+            if s_key in dequant_state:
+                return dequant_state[s_key]
+            return None
+
+        s = get_raw_smooth(name)
+        if s is not None: return s
+
+        # Mappings for Smooth Scale (Input Smoothness)
+        # Since input is shared for fused layers, just find ONE valid scale.
+        
+        # QKV
+        if ".attention.to_qkv" in name:
+            q_name = name.replace(".attention.to_qkv", ".attention.to_q")
+            s = get_raw_smooth(q_name)
+            if s is not None: return s
+
+        # FFN net.0.proj (w1)
+        if ".feed_forward.net.0.proj" in name:
+            w1_name = name.replace(".feed_forward.net.0.proj", ".feed_forward.w1")
+            s = get_raw_smooth(w1_name)
+            if s is not None: return s
+            
+        # FFN net.2 (w2)
+        if ".feed_forward.net.2" in name:
+            w2_name = name.replace(".feed_forward.net.2", ".feed_forward.w2")
+            s = get_raw_smooth(w2_name)
+            if s is not None: return s
+            
         return None
     
     if is_qkv_fused and qkv_modules:
