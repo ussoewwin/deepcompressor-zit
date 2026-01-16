@@ -648,6 +648,9 @@ def smooth_diffusion(
                     layer_cache=layer_cache,
                     layer_kwargs=layer_kwargs,
                 )
+                # ZIT VRAM safety: aggressively release CUDA blocks between layers
+                gc.collect()
+                torch.cuda.empty_cache()
     else:
         for layer in model.block_structs:
             smooth_diffusion_layer(layer=layer, config=config, smooth_cache=smooth_cache)

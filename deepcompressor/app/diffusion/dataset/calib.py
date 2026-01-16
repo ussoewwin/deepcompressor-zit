@@ -74,7 +74,7 @@ class DiffusionCalibDataset(DiffusionDataset):
 
     def __init__(self, path: str, num_samples: int = -1, seed: int = 0) -> None:
         super().__init__(path, num_samples=num_samples, seed=seed, ext=".pt")
-        data = [torch.load(path) for path in self.filepaths]
+        data = [torch.load(path, map_location=torch.device('cpu')) for path in self.filepaths]
         random.Random(seed).shuffle(data)
         self.data = data
 
