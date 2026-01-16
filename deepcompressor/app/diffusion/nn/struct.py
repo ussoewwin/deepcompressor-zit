@@ -2105,3 +2105,5 @@ class ZImageTransformerStruct(DiffusionTransformerStruct):
         return key_map
 
 ZImageTransformerStruct.register_factory(ZImageTransformer2DModel, ZImageTransformerStruct._default_construct)
+# Also register to DiffusionModelStruct so that DiffusionModelStruct.construct() finds ZImageTransformerStruct
+DiffusionModelStruct.register_factory(ZImageTransformer2DModel, ZImageTransformerStruct._default_construct)
