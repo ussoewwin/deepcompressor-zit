@@ -2002,3 +2002,106 @@ DiTStruct.register_factory(tp.Union[DIT_PIPELINE_CLS, DIT_CLS], DiTStruct._defau
 DiffusionTransformerStruct.register_factory(Transformer2DModel, DiffusionTransformerStruct._default_construct)
 
 DiffusionModelStruct.register_factory(tp.Union[PIPELINE_CLS, MODEL_CLS], DiffusionModelStruct._default_construct)
+
+
+@dataclass(kw_only=True)
+class ZImageTransformerStruct(DiffusionTransformerStruct):
+    context_refiner_blocks: nn.ModuleList = field(repr=False)
+    noise_refiner_blocks: nn.ModuleList = field(repr=False)
+    
+    context_refiner_structs: list[DiffusionTransformerBlockStruct] = field(init=False, repr=False)
+    noise_refiner_structs: list[DiffusionTransformerBlockStruct] = field(init=False, repr=False)
+    
+    context_refiner_rkey: tp.ClassVar[str] = "context_refiner"
+    noise_refiner_rkey: tp.ClassVar[str] = "noise_refiner"
+
+    def __post_init__(self):
+        super().__post_init__()
+        
+        self.context_refiner_structs = [
+            self.transformer_block_struct_cls.construct(
+                layer,
+                parent=self,
+                fname="context_refiner",
+                rname=f"context_refiner.{idx}",
+                rkey=self.context_refiner_rkey,
+                idx=idx,
+            )
+            for idx, layer in enumerate(self.context_refiner_blocks)
+        ]
+        
+        self.noise_refiner_structs = [
+            self.transformer_block_struct_cls.construct(
+                layer,
+                parent=self,
+                fname="noise_refiner",
+                rname=f"noise_refiner.{idx}",
+                rkey=self.noise_refiner_rkey,
+                idx=idx,
+            )
+            for idx, layer in enumerate(self.noise_refiner_blocks)
+        ]
+
+    @property
+    def block_structs(self) -> list[DiffusionBlockStruct]:
+        return [*self.transformer_block_structs, *self.context_refiner_structs, *self.noise_refiner_structs]
+    
+    @property
+    def block_names(self) -> list[str]:
+        # Need to include refiner names for iteration logging etc.
+        cr_names = [s.name for s in self.context_refiner_structs]
+        nr_names = [s.name for s in self.noise_refiner_structs]
+        return [*self.transformer_block_names, *cr_names, *nr_names]
+
+    @staticmethod
+    def _default_construct(
+        module: ZImageTransformer2DModel,
+        /,
+        parent: BaseModuleStruct = None,
+        fname: str = "",
+        rname: str = "",
+        rkey: str = "",
+        idx: int = 0,
+        **kwargs,
+    ) -> "ZImageTransformerStruct":
+        if not isinstance(module, ZImageTransformer2DModel):
+            raise NotImplementedError(f"Unsupported module type: {type(module)}")
+        
+        # Z-Image Turbo uses 'layers' for main blocks
+        return ZImageTransformerStruct(
+            module=module,
+            parent=parent,
+            fname=fname,
+            idx=idx,
+            rname=rname,
+            rkey=rkey,
+            norm_in=None, proj_in=None, norm_out=None, proj_out=None,
+            norm_in_rname="", proj_in_rname="", norm_out_rname="", proj_out_rname="",
+            transformer_blocks=module.layers,
+            transformer_blocks_rname="layers",
+            context_refiner_blocks=module.context_refiner,
+            noise_refiner_blocks=module.noise_refiner,
+        )
+
+    @classmethod
+    def _get_default_key_map(cls) -> dict[str, set[str]]:
+        key_map: super()._get_default_key_map()
+        # Call super method properly
+        key_map = super(ZImageTransformerStruct, cls)._get_default_key_map()
+        
+        block_cls = cls.transformer_block_struct_cls
+        block_key_map = block_cls._get_default_key_map()
+        
+        for root_rkey in [cls.context_refiner_rkey, cls.noise_refiner_rkey]:
+            root_key = root_rkey
+            for rkey, keys in block_key_map.items():
+                brkey = join_name(root_rkey, rkey, sep="_")
+                for key in keys:
+                    key = join_name(root_key, key, sep="_")
+                    key_map[rkey].add(key)
+                    key_map[brkey].add(key)
+                    if root_rkey:
+                        key_map[root_rkey].add(key)
+        return key_map
+
+ZImageTransformerStruct.register_factory(ZImageTransformer2DModel, ZImageTransformerStruct._default_construct)
