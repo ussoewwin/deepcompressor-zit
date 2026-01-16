@@ -23,6 +23,12 @@ if os.path.exists(zit_calib_path):
     print(f"Removing old cache at: {zit_calib_path}")
     shutil.rmtree(zit_calib_path)
 
+# Also remove jobs directory to force fresh quantization cache
+jobs_path = os.path.join(deepcompressor_path, 'jobs')
+if os.path.exists(jobs_path):
+    print(f"Removing old jobs cache at: {jobs_path}")
+    shutil.rmtree(jobs_path)
+
 # キャリブレーション実行
 print("Running calibration...")
 env = os.environ.copy()

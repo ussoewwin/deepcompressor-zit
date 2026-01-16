@@ -133,7 +133,6 @@ def _process_zit_linear(
         # Try exact match
         s0, s1 = get_raw(name)
         if s0 is not None:
-            if "to_qkv" not in name: return None, s1
             return s0, s1
 
         # Fallback 1: QKV Fusion (to_qkv -> to_q, to_k, to_v)
@@ -236,11 +235,6 @@ def _process_zit_linear(
             if s0 is not None:
                 return s0, s1
 
-        # Z-Image Turbo Constraint: Only to_qkv layers have wcscales (s0)
-        # Force s0 to None for all other layers to match official structure
-        if "to_qkv" not in name:
-            return None, s1
-            
         return None, None
     
     def _get_branch(name: str) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -420,9 +414,16 @@ def _process_zit_linear(
         if "smooth_orig" in converted:
             converted["smooth_factor_orig"] = converted.pop("smooth_orig")
         
-        # Ensure wcscales for nvfp4
-        if float_point and "wcscales" not in converted:
-            converted["wcscales"] = torch.ones(weight.shape[0], dtype=torch_dtype, device="cpu")
+        # wcscales handling: official model only has wcscales for to_qkv layers
+        if float_point:
+            if "to_qkv" in module_name:
+                # Ensure wcscales exists for to_qkv
+                if "wcscales" not in converted:
+                    converted["wcscales"] = torch.ones(weight.shape[0], dtype=torch_dtype, device="cpu")
+            else:
+                # Remove wcscales for non-qkv layers (to match official structure)
+                if "wcscales" in converted:
+                    del converted["wcscales"]
         
         # Write to output
         if f"{module_name}.weight" in out_state:

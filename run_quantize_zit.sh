@@ -13,6 +13,10 @@ source venv/bin/activate
 export PYTHONPATH="$(pwd)"
 export XFORMERS_DISABLED=1
 
+echo "=== Cleaning up previous cache files ==="
+rm -rf datasets
+rm -rf jobs
+
 echo "=== Starting ZIT Quantization (PTQ) ==="
 
 python -m deepcompressor.app.diffusion.ptq \
