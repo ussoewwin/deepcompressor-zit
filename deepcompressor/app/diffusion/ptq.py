@@ -294,8 +294,12 @@ def _zit_export_to_nunchaku_single_safetensors(
     assert orig_transformer_path, "orig_transformer_path is required"
     assert os.path.exists(orig_transformer_path), f"File not found: {orig_transformer_path}"
     
-    # Load original weights
-    orig_state = _load_safetensors_state_dict(orig_transformer_path)
+    # Load original weights (DiffSynth format)
+    orig_state_raw = _load_safetensors_state_dict(orig_transformer_path)
+    
+    # Convert to Diffusers format to match quantized model keys
+    from .pipeline.zit import convert_diffsynth_to_diffusers
+    orig_state = convert_diffsynth_to_diffusers(orig_state_raw)
     out_state: dict[str, torch.Tensor] = dict(orig_state)
     
     float_point = precision == "nvfp4"
