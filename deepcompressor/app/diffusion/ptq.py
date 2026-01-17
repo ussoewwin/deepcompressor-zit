@@ -249,15 +249,41 @@ def _process_zit_linear(
     
     def _get_branch(name: str) -> tuple[torch.Tensor, torch.Tensor] | None:
         if not branch_state:
+            print(f"[DEBUG] branch_state is empty/None for {name}")
             return None
+        
         # Try direct match
         b = branch_state.get(name, None)
-        # Try aliases if needed (omitted for brevity unless critical)
+        
+        # Try alternate prefixes if not found
+        if b is None:
+            aliases = [
+                f"model.{name}",
+                f"transformer.{name}",
+                name.replace("layers.", "transformer_blocks."),
+                name.replace("context_refiner.", "context_refiner_blocks."),
+                name.replace("noise_refiner.", "noise_refiner_blocks."),
+                # Check for bare names if prefixes exist in map
+                name.split(".")[-1] if "." in name else name
+            ]
+            for alias in aliases:
+                b = branch_state.get(alias, None)
+                if b is not None:
+                    print(f"[DEBUG] Found branch alias: {name} -> {alias}")
+                    break
+                    
+        # Debug missing
+        if b is None:
+            # Print closely matching keys for debugging
+            print(f"[DEBUG] Missing branch for {name}. Available keys (sample): {list(branch_state.keys())[:5]}")
+            candidates = [k for k in branch_state.keys() if name.split(".")[-1] in k]
+            if candidates:
+                print(f"[DEBUG]   Potential candidates: {candidates[:5]}")
+            return None
+
+        # Check content
         if not b or "a.weight" not in b or "b.weight" not in b:
-            # Try mapping for LoRA as well if needed
              if ".attention.to_qkv" in name:
-                 # Logic for fused LoRA? Complex. 
-                 # Assuming LoRA branches are handled or irrelevant for base quantization fix.
                  return None
              return None
         return b["a.weight"], b["b.weight"]
