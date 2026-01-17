@@ -271,6 +271,30 @@ def _process_zit_linear(
                 if b is not None:
                     print(f"[DEBUG] Found branch alias: {name} -> {alias}")
                     break
+        
+        # Special handling for fused QKV: combine Q, K, V branches
+        if b is None and ".attention.to_qkv" in name:
+            q_name = name.replace(".attention.to_qkv", ".attention.to_q")
+            k_name = name.replace(".attention.to_qkv", ".attention.to_k")
+            v_name = name.replace(".attention.to_qkv", ".attention.to_v")
+            
+            q_b = branch_state.get(q_name)
+            k_b = branch_state.get(k_name)
+            v_b = branch_state.get(v_name)
+            
+            if q_b and k_b and v_b and "a.weight" in q_b and "b.weight" in q_b:
+                # For QKV, the 'a' matrix (input projection) should be shared/same
+                # The 'b' matrix (output projection) needs to be concatenated
+                a_weight = q_b["a.weight"].to(device="cpu")  # Same for Q, K, V
+                b_q = q_b["b.weight"].to(device="cpu")
+                b_k = k_b["b.weight"].to(device="cpu")
+                b_v = v_b["b.weight"].to(device="cpu")
+                b_weight = torch.cat([b_q, b_k, b_v], dim=0)
+                print(f"[DEBUG] Fused QKV branch from {q_name}, {k_name}, {v_name}")
+                return a_weight, b_weight
+            else:
+                # QKV branches not available, skip SVD for this layer
+                return None
                     
         # Debug missing
         if b is None:
@@ -283,20 +307,20 @@ def _process_zit_linear(
 
         # Check content
         if not b or "a.weight" not in b or "b.weight" not in b:
-             if ".attention.to_qkv" in name:
-                 return None
-             return None
-        return b["a.weight"], b["b.weight"]
+            return None
+        
+        # Return tensors on CPU to avoid device mismatch
+        return b["a.weight"].to(device="cpu"), b["b.weight"].to(device="cpu")
     
     def _get_smooth(name: str) -> torch.Tensor | None:
         def get_raw_smooth(n):
             # Check smooth_cache first
             if smooth_cache and n in smooth_cache:
-                return smooth_cache[n]
+                return smooth_cache[n].to(device="cpu")
             # Fallback dequant
             s_key = f"{n}.smooth_factor"
             if s_key in dequant_state:
-                return dequant_state[s_key]
+                return dequant_state[s_key].to(device="cpu")
             return None
 
         s = get_raw_smooth(name)
