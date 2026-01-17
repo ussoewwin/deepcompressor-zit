@@ -295,6 +295,37 @@ def _process_zit_linear(
             else:
                 # QKV branches not available, skip SVD for this layer
                 return None
+        
+        # Special handling for fused FFN net.0.proj: combine w1 + w3 branches
+        if b is None and ".feed_forward.net.0.proj" in name:
+            w1_name = name.replace(".feed_forward.net.0.proj", ".feed_forward.w1")
+            w3_name = name.replace(".feed_forward.net.0.proj", ".feed_forward.w3")
+            
+            w1_b = branch_state.get(w1_name)
+            w3_b = branch_state.get(w3_name)
+            
+            if w1_b and "a.weight" in w1_b and "b.weight" in w1_b:
+                a_weight = w1_b["a.weight"].to(device="cpu")
+                b_w1 = w1_b["b.weight"].to(device="cpu")
+                
+                if w3_b and "b.weight" in w3_b:
+                    b_w3 = w3_b["b.weight"].to(device="cpu")
+                    b_weight = torch.cat([b_w1, b_w3], dim=0)
+                else:
+                    # w3 not available, just use w1 and pad
+                    b_weight = torch.cat([b_w1, b_w1.clone()], dim=0)
+                
+                print(f"[DEBUG] Fused FFN gate branch from {w1_name}, {w3_name}")
+                return a_weight, b_weight
+        
+        # Special handling for FFN net.2: map to w2
+        if b is None and ".feed_forward.net.2" in name:
+            w2_name = name.replace(".feed_forward.net.2", ".feed_forward.w2")
+            w2_b = branch_state.get(w2_name)
+            
+            if w2_b and "a.weight" in w2_b and "b.weight" in w2_b:
+                print(f"[DEBUG] FFN down branch from {w2_name}")
+                return w2_b["a.weight"].to(device="cpu"), w2_b["b.weight"].to(device="cpu")
                     
         # Debug missing
         if b is None:
@@ -464,9 +495,26 @@ def _process_zit_linear(
             subscale=s1.to(device="cpu") if s1 is not None else None,
         )
         
-        # Rename wscales to wtscale for non-qkv (Official model convention)
-        if "to_qkv" not in module_name and "wscales" in converted:
-            converted["wtscale"] = converted.pop("wscales")
+        # Remove bias from output (official model has no bias for quantized layers)
+        if "bias" in converted and converted["bias"] is None:
+            del converted["bias"]
+        elif "bias" in converted:
+            del converted["bias"]  # Always remove bias for quantized layers
+        
+        # Official model structure for nvfp4:
+        # - wscales: per-group scales (2D, e.g. [240, 3840])
+        # - wtscale: tensor-wise scale (scalar [1])
+        # Current convert.py outputs either wscales or wtscale based on scale shape
+        # We need BOTH for nvfp4 format
+        if float_point:
+            # Ensure wscales exists (per-group scales)
+            if "wscales" not in converted and "wtscale" in converted:
+                # wtscale is actually the per-group scale, rename back to wscales
+                converted["wscales"] = converted.pop("wtscale")
+            
+            # Add scalar wtscale (tensor-wise scale) if not present
+            if "wtscale" not in converted or (converted.get("wtscale") is not None and converted["wtscale"].numel() > 1):
+                converted["wtscale"] = torch.ones(1, dtype=torch_dtype, device="cpu")
 
         # Rename to match Nunchaku naming
         if "lora_down" in converted:
