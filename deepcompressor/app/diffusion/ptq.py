@@ -747,7 +747,8 @@ def main(config: DiffusionPtqRunConfig, logging_level: int = tools.logging.DEBUG
     # overwrite with unconverted keys and cause shape mismatch errors.
     # The code below is only for non-ZIT models that need manual transformer loading.
     
-    model = DiffusionModelStruct.construct(pipeline)
+    # Pass pipeline directly to ptq() - construct will be called inside ptq()
+    model = pipeline
     tools.logging.Formatter.indent_dec()
     
     save_dirpath = ""
