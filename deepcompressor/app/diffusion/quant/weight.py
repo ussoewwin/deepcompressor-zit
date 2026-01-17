@@ -333,7 +333,9 @@ def quantize_diffusion_weights(
     quantizer_state_dict = quantizer_state_dict or {}
     branch_state_dict = branch_state_dict or {}
 
-    if config.wgts.enabled_low_rank and (not config.wgts.low_rank.compensate or config.wgts.low_rank.num_iters > 1):
+    # NOTE: Original condition was too restrictive and skipped branch calculation when compensate=True and num_iters=1
+    # Changed to always calculate branches when low_rank is enabled, as they are needed for Nunchaku export
+    if config.wgts.enabled_low_rank:
         logger.info("* Adding low-rank branches to weights")
         tools.logging.Formatter.indent_inc()
         with tools.logging.redirect_tqdm():
