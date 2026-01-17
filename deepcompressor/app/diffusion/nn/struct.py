@@ -2071,6 +2071,9 @@ class ZImageTransformerStruct(DiTStruct):
             raise NotImplementedError(f"Unsupported module type: {type(module)}")
         
         # Z-Image Turbo uses 'layers' for main blocks
+        # DiTStruct requires: input_embed, time_embed, text_embed, norm_out, proj_out
+        # ZIT model structure: all_x_embedder (input), t_embedder (time), cap_embedder (text)
+        # all_final_layer contains both norm and projection
         return ZImageTransformerStruct(
             module=module,
             parent=parent,
@@ -2078,10 +2081,21 @@ class ZImageTransformerStruct(DiTStruct):
             idx=idx,
             rname=rname,
             rkey=rkey,
-            norm_in=None, proj_in=None, norm_out=None, proj_out=None,
-            norm_in_rname="", proj_in_rname="", norm_out_rname="", proj_out_rname="",
+            # DiTStruct required fields
+            input_embed=getattr(module, "all_x_embedder", None),
+            time_embed=getattr(module, "t_embedder", None),
+            text_embed=getattr(module, "cap_embedder", None),
+            norm_out=getattr(module, "all_final_layer", None),
+            proj_out=None,  # ZIT doesn't have separate proj_out
+            input_embed_rname="all_x_embedder" if hasattr(module, "all_x_embedder") else "",
+            time_embed_rname="t_embedder" if hasattr(module, "t_embedder") else "",
+            text_embed_rname="cap_embedder" if hasattr(module, "cap_embedder") else "",
+            norm_out_rname="all_final_layer" if hasattr(module, "all_final_layer") else "",
+            proj_out_rname="",
+            # Transformer blocks
             transformer_blocks=module.layers,
             transformer_blocks_rname="layers",
+            # ZIT-specific refiner blocks
             context_refiner_blocks=module.context_refiner,
             noise_refiner_blocks=module.noise_refiner,
         )
