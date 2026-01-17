@@ -2138,4 +2138,20 @@ class ZImageTransformerStruct(DiffusionTransformerStruct):
 # Force register/overwrite ZImageTransformerStruct factory to DiffusionModelStruct
 # We access the private _factories dict directly to ensure we overwrite any potential incorrect existing entry
 DiffusionModelStruct._factories[ZImageTransformer2DModel] = ZImageTransformerStruct._construct_direct
-# print(f"DEBUG: Explicitly registered ZImageTransformer2DModel factory: {DiffusionModelStruct._factories[ZImageTransformer2DModel]}")
+
+# Register all Pipeline classes to use _default_construct
+# This allows DiffusionModelStruct.construct(pipeline) to work properly
+for pipeline_cls in [
+    StableDiffusion3Pipeline,
+    PixArtAlphaPipeline,
+    PixArtSigmaPipeline,
+    FluxPipeline,
+    FluxControlPipeline,
+    FluxFillPipeline,
+    SanaPipeline,
+    ZImagePipeline,
+    StableDiffusionPipeline,
+    StableDiffusionXLPipeline,
+]:
+    DiffusionModelStruct._factories[pipeline_cls] = DiffusionModelStruct._default_construct
+
