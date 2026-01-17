@@ -2000,7 +2000,7 @@ DiffusionModelStruct.register_factory(tp.Union[PIPELINE_CLS, MODEL_CLS], Diffusi
 
 
 @dataclass(kw_only=True)
-class ZImageTransformerStruct(DiffusionTransformerStruct):
+class ZImageTransformerStruct(DiTStruct):
     context_refiner_blocks: nn.ModuleList = field(repr=False)
     noise_refiner_blocks: nn.ModuleList = field(repr=False)
     
