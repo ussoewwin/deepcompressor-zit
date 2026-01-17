@@ -489,13 +489,9 @@ def _zit_export_to_nunchaku_single_safetensors(
     #   - feed_forward.net.2
     
     # Collect layer prefixes
-    num_layers = len(transformer.layers)
-    num_context_refiner = len(transformer.context_refiner)
-    num_noise_refiner = len(transformer.noise_refiner)
-    
-    main_layers = [f"layers.{i}" for i in range(num_layers)]
-    context_refiner_layers = [f"context_refiner.{i}" for i in range(num_context_refiner)]
-    noise_refiner_layers = [f"noise_refiner.{i}" for i in range(num_noise_refiner)]
+    main_layers = [f"layers.{i}" for i in range(30)]
+    context_refiner_layers = [f"context_refiner.{i}" for i in range(2)]
+    noise_refiner_layers = [f"noise_refiner.{i}" for i in range(2)]
     all_layers = main_layers + context_refiner_layers + noise_refiner_layers
     
     logger.info(f"* Exporting Nunchaku Z-Image Turbo: processing {len(all_layers)} layers")
