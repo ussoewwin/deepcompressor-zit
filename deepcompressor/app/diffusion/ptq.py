@@ -558,21 +558,39 @@ def _process_zit_linear(
     else:
         # Single linear layer
         weight_key = f"{module_name}.weight"
+        is_refiner = "context_refiner" in module_name or "noise_refiner" in module_name
+        
+        if is_refiner:
+            print(f"\n[REFINER_LOG] ========== Processing {module_name} ==========")
+        
         if weight_key not in orig_state:
+            if is_refiner:
+                print(f"[REFINER_LOG] SKIP: {weight_key} not in orig_state")
             return
         
         weight = orig_state[weight_key]
         bias = orig_state.get(f"{module_name}.bias", None)
         
+        if is_refiner:
+            print(f"[REFINER_LOG] weight shape: {weight.shape}, dtype: {weight.dtype}")
+        
         s0, s1 = _get_scale(module_name)
         if s0 is None:
+            if is_refiner:
+                print(f"[REFINER_LOG] SKIP: scale is None (not quantized)")
             return  # Not quantized
+        
+        if is_refiner:
+            print(f"[REFINER_LOG] scale s0 shape: {s0.shape}, s1: {s1.shape if s1 is not None else None}")
         
         branch = _get_branch(module_name)
         
+        if is_refiner:
+            print(f"[REFINER_LOG] branch from cache: {branch is not None}")
+        
         # Dynamic SVD calculation fallback for Refiner layers when branch cache is missing
-        if branch is None and ("context_refiner" in module_name or "noise_refiner" in module_name):
-            print(f"[DEBUG] Dynamic SVD fallback for Refiner {module_name}")
+        if branch is None and is_refiner:
+            print(f"[REFINER_LOG] Starting dynamic SVD calculation...")
             try:
                 # First try dequant_state
                 dq_key = f"{module_name}.weight"
@@ -659,12 +677,15 @@ def _process_zit_linear(
                 proj_down = (u[:, :rank] * s_vals[:rank]).to(dtype=torch_dtype, device="cpu")
                 proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
                 branch = (proj_up, proj_down)
-                print(f"[DEBUG]   Computed residual SVD for Refiner {module_name}, rank={rank}, proj_down={proj_down.shape}, proj_up={proj_up.shape}")
+                print(f"[REFINER_LOG] Computed SVD: proj_down={proj_down.shape}, proj_up={proj_up.shape}")
             except Exception as e:
                 import traceback
-                print(f"[DEBUG] FAILED dynamic SVD for {module_name}: {e}")
+                print(f"[REFINER_LOG] FAILED dynamic SVD: {e}")
                 traceback.print_exc()
                 branch = None
+        
+        if is_refiner:
+            print(f"[REFINER_LOG] Final branch before convert: {branch is not None}")
         
         smooth = _get_smooth(module_name)
         
@@ -677,6 +698,11 @@ def _process_zit_linear(
             float_point=float_point,
             subscale=s1.to(device="cpu") if s1 is not None else None,
         )
+        
+        if is_refiner:
+            has_proj = "lora_down" in converted or "proj_down" in converted
+            print(f"[REFINER_LOG] Converted keys: {list(converted.keys())}")
+            print(f"[REFINER_LOG] Has proj_down/proj_up in output: {has_proj}")
         
         # Remove bias from output (official model has no bias for quantized layers)
         if "bias" in converted and converted["bias"] is None:
