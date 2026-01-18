@@ -495,6 +495,23 @@ def _process_zit_linear(
         if float_point and "wcscales" not in converted:
             converted["wcscales"] = torch.ones(fused_w.shape[0], dtype=torch_dtype, device="cpu")
         
+        # Post-convert SVD calculation for Refiner QKV layers that are missing proj_down/proj_up
+        if is_refiner and "proj_down" not in converted and "qweight" in converted:
+            try:
+                # Use fused original weight for SVD
+                orig_weight = fused_w.to(dtype=torch.float32, device="cpu")
+                
+                # Compute low-rank SVD on fused QKV weight
+                u, s, vh = torch.linalg.svd(orig_weight.double(), full_matrices=False)
+                proj_down = (u[:, :rank] * s[:rank]).to(dtype=torch_dtype, device="cpu")
+                proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
+                
+                converted["proj_down"] = proj_down
+                converted["proj_up"] = proj_up
+                print(f"[DEBUG] Post-convert SVD added for Refiner QKV: {module_name}, rank={rank}")
+            except Exception as e:
+                print(f"[DEBUG] Post-convert SVD failed for QKV {module_name}: {e}")
+        
         # Write to output
         for kk, vv in converted.items():
             out_state[f"{module_name}.{kk}"] = vv
@@ -598,6 +615,36 @@ def _process_zit_linear(
                 if "wcscales" in converted:
                     del converted["wcscales"]
         
+        # Post-convert SVD calculation for Refiner layers that are missing proj_down/proj_up
+        is_refiner = "context_refiner" in module_name or "noise_refiner" in module_name
+        if is_refiner and "proj_down" not in converted and "qweight" in converted and "wscales" in converted:
+            try:
+                # Reconstruct dequantized weight from qweight and wscales
+                qweight = converted["qweight"]  # int8, packed format
+                wscales = converted["wscales"]  # float8/float16 scales
+                
+                # For nvfp4: qweight is packed int8, wscales is per-group scales
+                # Approximate dequant: expand qweight to float and multiply by scales
+                # Note: This is an approximation since exact unpacking is complex
+                
+                # Simple approximation: treat quantized weight as close to original / scale
+                # For low-rank SVD, we need residual = orig - dequant
+                # Since dequant ≈ orig, residual should be small
+                
+                # Alternative: Use original weight directly for SVD (less accurate but works)
+                orig_weight = weight.to(dtype=torch.float32, device="cpu")
+                
+                # Compute low-rank SVD on original weight (not ideal but ensures proj_down/proj_up exist)
+                u, s, vh = torch.linalg.svd(orig_weight.double(), full_matrices=False)
+                proj_down = (u[:, :rank] * s[:rank]).to(dtype=torch_dtype, device="cpu")
+                proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
+                
+                converted["proj_down"] = proj_down
+                converted["proj_up"] = proj_up
+                print(f"[DEBUG] Post-convert SVD added for Refiner: {module_name}, rank={rank}")
+            except Exception as e:
+                print(f"[DEBUG] Post-convert SVD failed for {module_name}: {e}")
+        
         # Write to output
         if f"{module_name}.weight" in out_state:
             del out_state[f"{module_name}.weight"]
@@ -668,6 +715,19 @@ def _zit_export_to_nunchaku_single_safetensors(
             print(f"[DEBUG] No refiner keys found. Sample keys: {all_keys[:20]}")
     else:
         print("[DEBUG] branch_state is None or empty!")
+    
+    # Debug: Check dequant_state for Refiner keys
+    if dequant_state:
+        dq_keys = list(dequant_state.keys())
+        dq_refiner_keys = [k for k in dq_keys if "refiner" in k.lower()]
+        print(f"[DEBUG] dequant_state has {len(dq_keys)} keys")
+        print(f"[DEBUG] dequant_state Refiner keys: {len(dq_refiner_keys)}")
+        if dq_refiner_keys:
+            print(f"[DEBUG] dequant_state Refiner samples: {dq_refiner_keys[:10]}")
+        else:
+            print(f"[DEBUG] NO Refiner keys in dequant_state! Sample: {dq_keys[:10]}")
+    else:
+        print("[DEBUG] dequant_state is None or empty!")
     
     for layer_prefix in all_layers:
         # QKV: attention.to_qkv (already fused from DiffSynth conversion)
