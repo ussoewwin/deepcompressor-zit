@@ -1135,8 +1135,18 @@ def main(config: DiffusionPtqRunConfig, logging_level: int = tools.logging.DEBUG
         
         transformer = getattr(pipeline, "transformer", None)
         # Allow specifying official model path via environment variable for copying Refiner SVD
+        # Default to standard Vast.ai location if not specified
         official_model_path = os.environ.get("ZIT_OFFICIAL_MODEL_PATH", None)
-        logger.info(f"[DEBUG] ZIT_OFFICIAL_MODEL_PATH env var: {official_model_path}")
+        if official_model_path is None:
+            # Fallback to default path on Vast.ai servers
+            default_path = "/root/models/svdq-fp4_r128-z-image-turbo.safetensors"
+            if os.path.exists(default_path):
+                official_model_path = default_path
+                logger.info(f"[DEBUG] Using default official model path: {official_model_path}")
+            else:
+                logger.info(f"[DEBUG] ZIT_OFFICIAL_MODEL_PATH not set and default path not found: {default_path}")
+        else:
+            logger.info(f"[DEBUG] ZIT_OFFICIAL_MODEL_PATH env var: {official_model_path}")
         if official_model_path:
             logger.info(f"[DEBUG] File exists: {os.path.exists(official_model_path)}")
         export_ctx = {
