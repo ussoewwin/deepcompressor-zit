@@ -326,14 +326,34 @@ def _process_zit_linear(
             if w2_b and "a.weight" in w2_b and "b.weight" in w2_b:
                 print(f"[DEBUG] FFN down branch from {w2_name}")
                 return w2_b["a.weight"].to(device="cpu"), w2_b["b.weight"].to(device="cpu")
+        
+        # Last resort: try suffix matching for Refiner layers
+        # branch_state might have keys without certain prefixes
+        if b is None:
+            # Try to find a key that ends with the same pattern
+            # Example: "context_refiner.0.attention.to_out.0" might be stored as just "attention.to_out.0" 
+            # or with different prefix
+            name_parts = name.split(".")
+            for suffix_len in range(len(name_parts) - 1, 1, -1):
+                suffix = ".".join(name_parts[-suffix_len:])
+                for k in branch_state.keys():
+                    if k.endswith(suffix):
+                        b = branch_state[k]
+                        if b and "a.weight" in b and "b.weight" in b:
+                            print(f"[DEBUG] Found branch via suffix match: {name} -> {k}")
+                            return b["a.weight"].to(device="cpu"), b["b.weight"].to(device="cpu")
+                        break
+                if b is not None:
+                    break
                     
         # Debug missing
         if b is None:
             # Print closely matching keys for debugging
-            print(f"[DEBUG] Missing branch for {name}. Available keys (sample): {list(branch_state.keys())[:5]}")
-            candidates = [k for k in branch_state.keys() if name.split(".")[-1] in k]
-            if candidates:
-                print(f"[DEBUG]   Potential candidates: {candidates[:5]}")
+            refiner_keys = [k for k in branch_state.keys() if "refiner" in k.lower()]
+            if refiner_keys:
+                print(f"[DEBUG] Missing branch for {name}. Refiner keys in branch_state: {refiner_keys[:10]}")
+            else:
+                print(f"[DEBUG] Missing branch for {name}. NO refiner keys in branch_state. Sample keys: {list(branch_state.keys())[:10]}")
             return None
 
         # Check content
@@ -397,6 +417,18 @@ def _process_zit_linear(
         dq_k_w = dequant_state.get(f"{k_name}.weight")
         dq_v_w = dequant_state.get(f"{v_name}.weight")
         
+        # Fallback for Refiner layers: dequant might be stored as to_qkv instead of separate to_q/to_k/to_v
+        is_refiner = "context_refiner" in module_name or "noise_refiner" in module_name
+        if (dq_q_w is None or dq_k_w is None or dq_v_w is None) and is_refiner:
+            # Try to get fused dequant from to_qkv directly
+            dq_qkv_w = dequant_state.get(f"{module_name}.weight")
+            if dq_qkv_w is not None:
+                # Split the fused dequant back into Q/K/V parts
+                split_size = dq_qkv_w.shape[0] // 3
+                dq_q_w = dq_qkv_w[:split_size]
+                dq_k_w = dq_qkv_w[split_size:split_size*2]
+                dq_v_w = dq_qkv_w[split_size*2:]
+        
         if dq_q_w is not None and dq_k_w is not None and dq_v_w is not None:
             dq_fused_w = torch.cat([dq_q_w, dq_k_w, dq_v_w], dim=0)
             residual = (fused_w.to(dtype=torch.float32) - dq_fused_w.to(dtype=torch.float32)).to(dtype=torch.float16)
@@ -404,6 +436,8 @@ def _process_zit_linear(
             b_w = (u[:, :rank] * s[:rank]).to(dtype=torch_dtype, device="cpu")
             a_w = vh[:rank].to(dtype=torch_dtype, device="cpu")
             lora = (a_w, b_w)
+            if is_refiner:
+                print(f"[DEBUG] Computed dynamic SVD for Refiner QKV: {module_name}")
         else:
             lora = _get_branch(q_name)
         
@@ -483,6 +517,29 @@ def _process_zit_linear(
             return  # Not quantized
         
         branch = _get_branch(module_name)
+        
+        # Dynamic SVD calculation fallback for Refiner layers when branch cache is missing
+        if branch is None and ("context_refiner" in module_name or "noise_refiner" in module_name):
+            # Compute SVD from residual between original and dequantized weights
+            dq_key = f"{module_name}.weight"
+            if dq_key in dequant_state:
+                dq_weight = dequant_state[dq_key].to(dtype=torch.float32, device="cpu")
+                orig_weight = weight.to(dtype=torch.float32, device="cpu")
+                residual = orig_weight - dq_weight
+                
+                # Compute low-rank approximation using SVD
+                try:
+                    u, s, vh = torch.linalg.svd(residual.double(), full_matrices=False)
+                    # proj_down = U * S (first 'rank' columns)
+                    # proj_up = Vh (first 'rank' rows)
+                    proj_down = (u[:, :rank] * s[:rank]).to(dtype=torch_dtype, device="cpu")
+                    proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
+                    branch = (proj_up, proj_down)
+                    print(f"[DEBUG] Computed dynamic SVD branch for {module_name}, rank={rank}")
+                except Exception as e:
+                    print(f"[DEBUG] Failed to compute dynamic SVD for {module_name}: {e}")
+                    branch = None
+        
         smooth = _get_smooth(module_name)
         
         converted = convert_to_nunchaku_w4x4y16_linear_state_dict(
