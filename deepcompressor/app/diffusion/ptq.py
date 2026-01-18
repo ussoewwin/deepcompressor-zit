@@ -1136,6 +1136,9 @@ def main(config: DiffusionPtqRunConfig, logging_level: int = tools.logging.DEBUG
         transformer = getattr(pipeline, "transformer", None)
         # Allow specifying official model path via environment variable for copying Refiner SVD
         official_model_path = os.environ.get("ZIT_OFFICIAL_MODEL_PATH", None)
+        logger.info(f"[DEBUG] ZIT_OFFICIAL_MODEL_PATH env var: {official_model_path}")
+        if official_model_path:
+            logger.info(f"[DEBUG] File exists: {os.path.exists(official_model_path)}")
         export_ctx = {
             "output_path": config.export_nunchaku_zit,
             "orig_transformer_path": config.pipeline.transformer_path,
