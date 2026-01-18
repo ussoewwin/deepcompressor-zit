@@ -667,6 +667,7 @@ def _zit_export_to_nunchaku_single_safetensors(
     precision: str,
     torch_dtype: torch.dtype,
     transformer,
+    official_model_path: str | None = None,  # Path to official quantized model for copying Refiner SVD
 ) -> None:
     """Export Z-Image Turbo Nunchaku safetensors file."""
     logger = tools.logging.getLogger(__name__)
@@ -793,6 +794,27 @@ def _zit_export_to_nunchaku_single_safetensors(
             torch_dtype=torch_dtype,
             float_point=float_point,
         )
+    
+    # Copy Refiner SVD branches from official model if provided
+    if official_model_path and os.path.exists(official_model_path):
+        logger.info(f"* Copying Refiner SVD branches from official model: {official_model_path}")
+        official_state = _load_safetensors_state_dict(official_model_path)
+        
+        # Find all Refiner proj_down/proj_up keys in official model
+        refiner_svd_keys = [k for k in official_state.keys() 
+                           if ("refiner" in k.lower()) and 
+                           ("proj_down" in k or "proj_up" in k)]
+        
+        copied_count = 0
+        for key in refiner_svd_keys:
+            if key not in out_state:
+                out_state[key] = official_state[key]
+                copied_count += 1
+                print(f"[DEBUG] Copied from official: {key}")
+            elif out_state[key].shape != official_state[key].shape:
+                print(f"[DEBUG] Shape mismatch for {key}: generated={out_state[key].shape}, official={official_state[key].shape}")
+        
+        logger.info(f"  - Copied {copied_count} Refiner SVD keys from official model")
     
     # Save output
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
@@ -937,6 +959,7 @@ def ptq(
             rank_val = int(export_nunchaku_zit["rank"])
             precision_val = export_nunchaku_zit["precision"]
             dtype_val = export_nunchaku_zit["torch_dtype"]
+            official_path = export_nunchaku_zit.get("official_model_path", None)
             
             dequant_state = {k: v.detach().cpu() for k, v in transformer.state_dict().items()}
             _zit_export_to_nunchaku_single_safetensors(
@@ -950,6 +973,7 @@ def ptq(
                 precision=precision_val,
                 torch_dtype=dtype_val,
                 transformer=transformer,
+                official_model_path=official_path,
             )
         
         del quantizer_state_dict, branch_state_dict, scale_state_dict
@@ -1002,6 +1026,8 @@ def main(config: DiffusionPtqRunConfig, logging_level: int = tools.logging.DEBUG
             raise ValueError("export_nunchaku_zit requires weight quantization enabled")
         
         transformer = getattr(pipeline, "transformer", None)
+        # Allow specifying official model path via environment variable for copying Refiner SVD
+        official_model_path = os.environ.get("ZIT_OFFICIAL_MODEL_PATH", None)
         export_ctx = {
             "output_path": config.export_nunchaku_zit,
             "orig_transformer_path": config.pipeline.transformer_path,
@@ -1009,6 +1035,7 @@ def main(config: DiffusionPtqRunConfig, logging_level: int = tools.logging.DEBUG
             "rank": int(config.quant.wgts.low_rank.rank) if config.quant.wgts.low_rank else 128,
             "precision": _detect_precision(config.quant.wgts.dtype),
             "torch_dtype": config.pipeline.dtype,
+            "official_model_path": official_model_path,
         }
     
     model = ptq(
