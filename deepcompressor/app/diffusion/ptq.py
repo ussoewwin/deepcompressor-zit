@@ -588,22 +588,49 @@ def _process_zit_linear(
                     # dequant: codebook_value * scale
                     orig_weight = weight.to(dtype=torch.float32, device="cpu")
                     scale_expanded = s0.to(dtype=torch.float32, device="cpu")
-                    print(f"[DEBUG]   orig_weight shape: {orig_weight.shape}, scale shape: {scale_expanded.shape}")
+                    print(f"[DEBUG]   orig_weight shape: {orig_weight.shape}, scale shape: {scale_expanded.shape}, ndim: {scale_expanded.ndim}")
                     
                     # Get scale shape info
                     oc, ic = orig_weight.shape
+                    
+                    # Handle various scale formats
                     if scale_expanded.ndim == 4:
-                        # scale shape: [oc, 1, ng, 1]
+                        # scale shape could be: [oc, 1, ng, 1] or [1, 1, ng, 1] or [oc, 1, 1, 1]
+                        scale_oc = scale_expanded.shape[0]
                         ng = scale_expanded.shape[2]
-                        gs = ic // ng
-                        scale_for_quant = scale_expanded.view(oc, 1, ng, 1)
+                        
+                        # Expand scale if needed
+                        if scale_oc == 1 and oc > 1:
+                            scale_for_quant = scale_expanded.expand(oc, 1, ng, 1).clone()
+                        elif scale_oc == oc:
+                            scale_for_quant = scale_expanded
+                        else:
+                            # Scale channel dimension doesn't match, need to handle
+                            print(f"[DEBUG]   Scale shape mismatch: scale_oc={scale_oc}, weight_oc={oc}")
+                            # Try to broadcast
+                            scale_for_quant = scale_expanded.expand(oc, 1, ng, 1).clone()
+                        
+                        gs = ic // ng if ng > 0 else ic
+                    elif scale_expanded.ndim == 1:
+                        # Per-channel or per-tensor 1D scale
+                        if scale_expanded.shape[0] == oc:
+                            scale_for_quant = scale_expanded.view(oc, 1, 1, 1)
+                            ng = 1
+                        elif scale_expanded.shape[0] == 1:
+                            scale_for_quant = scale_expanded.view(1, 1, 1, 1).expand(oc, 1, 1, 1)
+                            ng = 1
+                        else:
+                            # Assume per-group scale
+                            ng = scale_expanded.shape[0]
+                            scale_for_quant = scale_expanded.view(1, 1, ng, 1).expand(oc, 1, ng, 1)
+                        gs = ic // ng if ng > 0 else ic
                     else:
-                        # Per-tensor scale
+                        # Per-tensor scalar scale
                         scale_for_quant = scale_expanded.view(1, 1, 1, 1).expand(oc, 1, 1, 1)
                         ng = 1
                         gs = ic
                     
-                    print(f"[DEBUG]   oc={oc}, ic={ic}, ng={ng}, gs={gs}")
+                    print(f"[DEBUG]   oc={oc}, ic={ic}, ng={ng}, gs={gs}, scale_for_quant shape={scale_for_quant.shape}")
                     
                     # Quantize: weight / scale
                     weight_scaled = orig_weight.view(oc, 1, ng, gs) / scale_for_quant
