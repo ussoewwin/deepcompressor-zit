@@ -429,6 +429,7 @@ def _process_zit_linear(
                 dq_k_w = dq_qkv_w[split_size:split_size*2]
                 dq_v_w = dq_qkv_w[split_size*2:]
         
+        lora = None
         if dq_q_w is not None and dq_k_w is not None and dq_v_w is not None:
             dq_fused_w = torch.cat([dq_q_w, dq_k_w, dq_v_w], dim=0)
             residual = (fused_w.to(dtype=torch.float32) - dq_fused_w.to(dtype=torch.float32)).to(dtype=torch.float16)
@@ -437,7 +438,12 @@ def _process_zit_linear(
             a_w = vh[:rank].to(dtype=torch_dtype, device="cpu")
             lora = (a_w, b_w)
             if is_refiner:
-                print(f"[DEBUG] Computed dynamic SVD for Refiner QKV: {module_name}")
+                print(f"[DEBUG] Computed dynamic SVD for Refiner QKV from dequant_state: {module_name}")
+        elif is_refiner:
+            # Compute dequant ourselves using nvfp4 quantization logic
+            # First need to get fused scales - will be done after scale fusion below
+            # For now, mark that we need to compute lora after scale fusion
+            lora = "COMPUTE_AFTER_SCALE_FUSION"
         else:
             lora = _get_branch(q_name)
         
@@ -471,6 +477,52 @@ def _process_zit_linear(
         
         smooth = _get_smooth(q_name)
         
+        # Compute lora for Refiner layers if we marked it for post-scale-fusion computation
+        if lora == "COMPUTE_AFTER_SCALE_FUSION":
+            try:
+                # Compute dequant ourselves using nvfp4 quantization logic
+                orig_weight = fused_w.to(dtype=torch.float32, device="cpu")
+                scale_expanded = fused_s0.to(dtype=torch.float32, device="cpu")
+                
+                # Get scale shape info
+                oc, ic = orig_weight.shape
+                if scale_expanded.ndim == 4:
+                    ng = scale_expanded.shape[2]
+                    gs = ic // ng
+                    scale_for_quant = scale_expanded.view(oc, 1, ng, 1)
+                else:
+                    scale_for_quant = scale_expanded.view(1, 1, 1, 1).expand(oc, 1, 1, 1)
+                    ng = 1
+                    gs = ic
+                
+                # Quantize: weight / scale
+                weight_scaled = orig_weight.view(oc, 1, ng, gs) / scale_for_quant
+                
+                # nvfp4 codebook
+                codebook = torch.tensor(
+                    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+                    dtype=torch.float32, device="cpu"
+                )
+                
+                # Map to nearest codebook value
+                diffs = weight_scaled.unsqueeze(-1) - codebook
+                quantized_indices = diffs.abs().argmin(dim=-1)
+                quantized_values = codebook[quantized_indices]
+                
+                # Dequantize: quantized_value * scale
+                dq_weight = (quantized_values * scale_for_quant).view(oc, ic)
+                residual = orig_weight - dq_weight
+                
+                # Compute low-rank approximation using SVD on residual
+                u, s_vals, vh = torch.linalg.svd(residual.double(), full_matrices=False)
+                proj_down = (u[:, :rank] * s_vals[:rank]).to(dtype=torch_dtype, device="cpu")
+                proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
+                lora = (proj_up, proj_down)
+                print(f"[DEBUG] Computed residual SVD for Refiner QKV {module_name}: residual_norm={residual.norm().item():.4f}, rank={rank}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to compute residual SVD for QKV {module_name}: {e}")
+                lora = None
+        
         converted = convert_to_nunchaku_w4x4y16_linear_state_dict(
             weight=fused_w.to(dtype=torch_dtype, device="cpu"),
             scale=fused_s0.to(device="cpu"),
@@ -494,23 +546,6 @@ def _process_zit_linear(
         # Ensure wcscales for nvfp4
         if float_point and "wcscales" not in converted:
             converted["wcscales"] = torch.ones(fused_w.shape[0], dtype=torch_dtype, device="cpu")
-        
-        # Post-convert SVD calculation for Refiner QKV layers that are missing proj_down/proj_up
-        if is_refiner and "proj_down" not in converted and "qweight" in converted:
-            try:
-                # Use fused original weight for SVD
-                orig_weight = fused_w.to(dtype=torch.float32, device="cpu")
-                
-                # Compute low-rank SVD on fused QKV weight
-                u, s, vh = torch.linalg.svd(orig_weight.double(), full_matrices=False)
-                proj_down = (u[:, :rank] * s[:rank]).to(dtype=torch_dtype, device="cpu")
-                proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
-                
-                converted["proj_down"] = proj_down
-                converted["proj_up"] = proj_up
-                print(f"[DEBUG] Post-convert SVD added for Refiner QKV: {module_name}, rank={rank}")
-            except Exception as e:
-                print(f"[DEBUG] Post-convert SVD failed for QKV {module_name}: {e}")
         
         # Write to output
         for kk, vv in converted.items():
@@ -537,25 +572,63 @@ def _process_zit_linear(
         
         # Dynamic SVD calculation fallback for Refiner layers when branch cache is missing
         if branch is None and ("context_refiner" in module_name or "noise_refiner" in module_name):
-            # Compute SVD from residual between original and dequantized weights
+            # First try dequant_state
             dq_key = f"{module_name}.weight"
             if dq_key in dequant_state:
                 dq_weight = dequant_state[dq_key].to(dtype=torch.float32, device="cpu")
                 orig_weight = weight.to(dtype=torch.float32, device="cpu")
                 residual = orig_weight - dq_weight
+            else:
+                # Compute dequant ourselves using the same quantization logic as convert
+                # nvfp4 quantization: weight_scaled = weight / scale, then map to codebook
+                # dequant: codebook_value * scale
+                orig_weight = weight.to(dtype=torch.float32, device="cpu")
+                scale_expanded = s0.to(dtype=torch.float32, device="cpu")
                 
-                # Compute low-rank approximation using SVD
-                try:
-                    u, s, vh = torch.linalg.svd(residual.double(), full_matrices=False)
-                    # proj_down = U * S (first 'rank' columns)
-                    # proj_up = Vh (first 'rank' rows)
-                    proj_down = (u[:, :rank] * s[:rank]).to(dtype=torch_dtype, device="cpu")
-                    proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
-                    branch = (proj_up, proj_down)
-                    print(f"[DEBUG] Computed dynamic SVD branch for {module_name}, rank={rank}")
-                except Exception as e:
-                    print(f"[DEBUG] Failed to compute dynamic SVD for {module_name}: {e}")
-                    branch = None
+                # Get scale shape info
+                oc, ic = orig_weight.shape
+                if scale_expanded.ndim == 4:
+                    # scale shape: [oc, 1, ng, 1]
+                    ng = scale_expanded.shape[2]
+                    gs = ic // ng
+                    scale_for_quant = scale_expanded.view(oc, 1, ng, 1)
+                else:
+                    # Per-tensor scale
+                    scale_for_quant = scale_expanded.view(1, 1, 1, 1).expand(oc, 1, 1, 1)
+                    ng = 1
+                    gs = ic
+                
+                # Quantize: weight / scale
+                weight_scaled = orig_weight.view(oc, 1, ng, gs) / scale_for_quant
+                
+                # nvfp4 codebook
+                codebook = torch.tensor(
+                    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+                    dtype=torch.float32, device="cpu"
+                )
+                
+                # Map to nearest codebook value
+                diffs = weight_scaled.unsqueeze(-1) - codebook
+                quantized_indices = diffs.abs().argmin(dim=-1)
+                quantized_values = codebook[quantized_indices]
+                
+                # Dequantize: quantized_value * scale
+                dq_weight = (quantized_values * scale_for_quant).view(oc, ic)
+                residual = orig_weight - dq_weight
+                print(f"[DEBUG] Computed dequant for Refiner {module_name}: residual_norm={residual.norm().item():.4f}")
+            
+            # Compute low-rank approximation using SVD on residual
+            try:
+                u, s_vals, vh = torch.linalg.svd(residual.double(), full_matrices=False)
+                # proj_down = U * S (first 'rank' columns)
+                # proj_up = Vh (first 'rank' rows)
+                proj_down = (u[:, :rank] * s_vals[:rank]).to(dtype=torch_dtype, device="cpu")
+                proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
+                branch = (proj_up, proj_down)
+                print(f"[DEBUG] Computed residual SVD for Refiner {module_name}, rank={rank}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to compute residual SVD for {module_name}: {e}")
+                branch = None
         
         smooth = _get_smooth(module_name)
         
@@ -614,36 +687,6 @@ def _process_zit_linear(
                 # Remove wcscales for non-qkv layers (to match official structure)
                 if "wcscales" in converted:
                     del converted["wcscales"]
-        
-        # Post-convert SVD calculation for Refiner layers that are missing proj_down/proj_up
-        is_refiner = "context_refiner" in module_name or "noise_refiner" in module_name
-        if is_refiner and "proj_down" not in converted and "qweight" in converted and "wscales" in converted:
-            try:
-                # Reconstruct dequantized weight from qweight and wscales
-                qweight = converted["qweight"]  # int8, packed format
-                wscales = converted["wscales"]  # float8/float16 scales
-                
-                # For nvfp4: qweight is packed int8, wscales is per-group scales
-                # Approximate dequant: expand qweight to float and multiply by scales
-                # Note: This is an approximation since exact unpacking is complex
-                
-                # Simple approximation: treat quantized weight as close to original / scale
-                # For low-rank SVD, we need residual = orig - dequant
-                # Since dequant ≈ orig, residual should be small
-                
-                # Alternative: Use original weight directly for SVD (less accurate but works)
-                orig_weight = weight.to(dtype=torch.float32, device="cpu")
-                
-                # Compute low-rank SVD on original weight (not ideal but ensures proj_down/proj_up exist)
-                u, s, vh = torch.linalg.svd(orig_weight.double(), full_matrices=False)
-                proj_down = (u[:, :rank] * s[:rank]).to(dtype=torch_dtype, device="cpu")
-                proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
-                
-                converted["proj_down"] = proj_down
-                converted["proj_up"] = proj_up
-                print(f"[DEBUG] Post-convert SVD added for Refiner: {module_name}, rank={rank}")
-            except Exception as e:
-                print(f"[DEBUG] Post-convert SVD failed for {module_name}: {e}")
         
         # Write to output
         if f"{module_name}.weight" in out_state:
