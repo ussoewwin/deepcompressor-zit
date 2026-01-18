@@ -12,6 +12,8 @@ source venv/bin/activate
 # Set environment variables
 export PYTHONPATH="$(pwd)"
 export XFORMERS_DISABLED=1
+# Official model path for copying Refiner weights
+export ZIT_OFFICIAL_MODEL_PATH="/root/models/svdq-fp4_r128-z-image-turbo.safetensors"
 
 echo "=== Running Pre-flight Verification ==="
 python tools/verify_struct.py
