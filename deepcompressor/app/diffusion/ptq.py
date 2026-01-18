@@ -900,26 +900,29 @@ def _zit_export_to_nunchaku_single_safetensors(
             float_point=float_point,
         )
     
-    # Copy Refiner SVD branches from official model if provided
+    # Copy ALL Refiner weights from official model if provided
+    # This ensures Refiner layers match the official model exactly (qweight, wscales, proj, etc.)
     if official_model_path and os.path.exists(official_model_path):
-        logger.info(f"* Copying Refiner SVD branches from official model: {official_model_path}")
+        logger.info(f"* Copying ALL Refiner weights from official model: {official_model_path}")
         official_state = _load_safetensors_state_dict(official_model_path)
         
-        # Find all Refiner proj_down/proj_up keys in official model
-        refiner_svd_keys = [k for k in official_state.keys() 
-                           if ("refiner" in k.lower()) and 
-                           ("proj_down" in k or "proj_up" in k)]
+        # Find all Refiner keys in official model
+        refiner_keys = [k for k in official_state.keys() 
+                       if ("context_refiner" in k or "noise_refiner" in k)]
         
         copied_count = 0
-        for key in refiner_svd_keys:
+        overwritten_count = 0
+        for key in refiner_keys:
             if key not in out_state:
                 out_state[key] = official_state[key]
                 copied_count += 1
-                print(f"[DEBUG] Copied from official: {key}")
-            elif out_state[key].shape != official_state[key].shape:
-                print(f"[DEBUG] Shape mismatch for {key}: generated={out_state[key].shape}, official={official_state[key].shape}")
+            else:
+                # Overwrite with official value
+                out_state[key] = official_state[key]
+                overwritten_count += 1
         
-        logger.info(f"  - Copied {copied_count} Refiner SVD keys from official model")
+        logger.info(f"  - Copied {copied_count} new Refiner keys from official model")
+        logger.info(f"  - Overwrote {overwritten_count} Refiner keys with official values")
     
     # Save output
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
