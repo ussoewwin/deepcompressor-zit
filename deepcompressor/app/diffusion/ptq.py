@@ -503,18 +503,22 @@ def _process_zit_linear(
         
         # Official model structure for nvfp4:
         # - wscales: per-group scales (2D, e.g. [240, 3840])
-        # - wtscale: tensor-wise scale (scalar [1])
+        # - wtscale: tensor-wise scale (scalar [1]) - NOT for QKV layers
         # Current convert.py outputs either wscales or wtscale based on scale shape
-        # We need BOTH for nvfp4 format
         if float_point:
             # Ensure wscales exists (per-group scales)
             if "wscales" not in converted and "wtscale" in converted:
                 # wtscale is actually the per-group scale, rename back to wscales
                 converted["wscales"] = converted.pop("wtscale")
             
-            # Add scalar wtscale (tensor-wise scale) if not present
-            if "wtscale" not in converted or (converted.get("wtscale") is not None and converted["wtscale"].numel() > 1):
-                converted["wtscale"] = torch.ones(1, dtype=torch_dtype, device="cpu")
+            # Add scalar wtscale only for NON-QKV layers (official model has no wtscale for QKV)
+            if "to_qkv" not in module_name:
+                if "wtscale" not in converted or (converted.get("wtscale") is not None and converted["wtscale"].numel() > 1):
+                    converted["wtscale"] = torch.ones(1, dtype=torch_dtype, device="cpu")
+            else:
+                # QKV layers should not have wtscale
+                if "wtscale" in converted:
+                    del converted["wtscale"]
 
         # Rename to match Nunchaku naming
         if "lora_down" in converted:
@@ -593,6 +597,20 @@ def _zit_export_to_nunchaku_single_safetensors(
     all_layers = main_layers + context_refiner_layers + noise_refiner_layers
     
     logger.info(f"* Exporting Nunchaku Z-Image Turbo: processing {len(all_layers)} layers")
+    
+    # Debug: Print all branch_state keys to identify key naming pattern
+    if branch_state:
+        all_keys = sorted(branch_state.keys())
+        print(f"[DEBUG] branch_state has {len(all_keys)} keys")
+        refiner_keys = [k for k in all_keys if "refiner" in k.lower()]
+        print(f"[DEBUG] Refiner-related keys: {len(refiner_keys)}")
+        if refiner_keys:
+            print(f"[DEBUG] Refiner key samples: {refiner_keys[:10]}")
+        else:
+            # Show sample keys to understand naming
+            print(f"[DEBUG] No refiner keys found. Sample keys: {all_keys[:20]}")
+    else:
+        print("[DEBUG] branch_state is None or empty!")
     
     for layer_prefix in all_layers:
         # QKV: attention.to_qkv (already fused from DiffSynth conversion)
