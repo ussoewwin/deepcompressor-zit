@@ -572,62 +572,71 @@ def _process_zit_linear(
         
         # Dynamic SVD calculation fallback for Refiner layers when branch cache is missing
         if branch is None and ("context_refiner" in module_name or "noise_refiner" in module_name):
-            # First try dequant_state
-            dq_key = f"{module_name}.weight"
-            if dq_key in dequant_state:
-                dq_weight = dequant_state[dq_key].to(dtype=torch.float32, device="cpu")
-                orig_weight = weight.to(dtype=torch.float32, device="cpu")
-                residual = orig_weight - dq_weight
-            else:
-                # Compute dequant ourselves using the same quantization logic as convert
-                # nvfp4 quantization: weight_scaled = weight / scale, then map to codebook
-                # dequant: codebook_value * scale
-                orig_weight = weight.to(dtype=torch.float32, device="cpu")
-                scale_expanded = s0.to(dtype=torch.float32, device="cpu")
-                
-                # Get scale shape info
-                oc, ic = orig_weight.shape
-                if scale_expanded.ndim == 4:
-                    # scale shape: [oc, 1, ng, 1]
-                    ng = scale_expanded.shape[2]
-                    gs = ic // ng
-                    scale_for_quant = scale_expanded.view(oc, 1, ng, 1)
-                else:
-                    # Per-tensor scale
-                    scale_for_quant = scale_expanded.view(1, 1, 1, 1).expand(oc, 1, 1, 1)
-                    ng = 1
-                    gs = ic
-                
-                # Quantize: weight / scale
-                weight_scaled = orig_weight.view(oc, 1, ng, gs) / scale_for_quant
-                
-                # nvfp4 codebook
-                codebook = torch.tensor(
-                    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
-                    dtype=torch.float32, device="cpu"
-                )
-                
-                # Map to nearest codebook value
-                diffs = weight_scaled.unsqueeze(-1) - codebook
-                quantized_indices = diffs.abs().argmin(dim=-1)
-                quantized_values = codebook[quantized_indices]
-                
-                # Dequantize: quantized_value * scale
-                dq_weight = (quantized_values * scale_for_quant).view(oc, ic)
-                residual = orig_weight - dq_weight
-                print(f"[DEBUG] Computed dequant for Refiner {module_name}: residual_norm={residual.norm().item():.4f}")
-            
-            # Compute low-rank approximation using SVD on residual
+            print(f"[DEBUG] Dynamic SVD fallback for Refiner {module_name}")
             try:
+                # First try dequant_state
+                dq_key = f"{module_name}.weight"
+                if dq_key in dequant_state:
+                    print(f"[DEBUG]   Found dequant_state key: {dq_key}")
+                    dq_weight = dequant_state[dq_key].to(dtype=torch.float32, device="cpu")
+                    orig_weight = weight.to(dtype=torch.float32, device="cpu")
+                    residual = orig_weight - dq_weight
+                else:
+                    print(f"[DEBUG]   No dequant_state key, computing dequant manually")
+                    # Compute dequant ourselves using the same quantization logic as convert
+                    # nvfp4 quantization: weight_scaled = weight / scale, then map to codebook
+                    # dequant: codebook_value * scale
+                    orig_weight = weight.to(dtype=torch.float32, device="cpu")
+                    scale_expanded = s0.to(dtype=torch.float32, device="cpu")
+                    print(f"[DEBUG]   orig_weight shape: {orig_weight.shape}, scale shape: {scale_expanded.shape}")
+                    
+                    # Get scale shape info
+                    oc, ic = orig_weight.shape
+                    if scale_expanded.ndim == 4:
+                        # scale shape: [oc, 1, ng, 1]
+                        ng = scale_expanded.shape[2]
+                        gs = ic // ng
+                        scale_for_quant = scale_expanded.view(oc, 1, ng, 1)
+                    else:
+                        # Per-tensor scale
+                        scale_for_quant = scale_expanded.view(1, 1, 1, 1).expand(oc, 1, 1, 1)
+                        ng = 1
+                        gs = ic
+                    
+                    print(f"[DEBUG]   oc={oc}, ic={ic}, ng={ng}, gs={gs}")
+                    
+                    # Quantize: weight / scale
+                    weight_scaled = orig_weight.view(oc, 1, ng, gs) / scale_for_quant
+                    
+                    # nvfp4 codebook
+                    codebook = torch.tensor(
+                        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+                        dtype=torch.float32, device="cpu"
+                    )
+                    
+                    # Map to nearest codebook value
+                    diffs = weight_scaled.unsqueeze(-1) - codebook
+                    quantized_indices = diffs.abs().argmin(dim=-1)
+                    quantized_values = codebook[quantized_indices]
+                    
+                    # Dequantize: quantized_value * scale
+                    dq_weight = (quantized_values * scale_for_quant).view(oc, ic)
+                    residual = orig_weight - dq_weight
+                    print(f"[DEBUG]   Computed dequant for Refiner {module_name}: residual_norm={residual.norm().item():.4f}")
+                
+                # Compute low-rank approximation using SVD on residual
+                print(f"[DEBUG]   Computing SVD on residual shape {residual.shape}")
                 u, s_vals, vh = torch.linalg.svd(residual.double(), full_matrices=False)
                 # proj_down = U * S (first 'rank' columns)
                 # proj_up = Vh (first 'rank' rows)
                 proj_down = (u[:, :rank] * s_vals[:rank]).to(dtype=torch_dtype, device="cpu")
                 proj_up = vh[:rank].to(dtype=torch_dtype, device="cpu")
                 branch = (proj_up, proj_down)
-                print(f"[DEBUG] Computed residual SVD for Refiner {module_name}, rank={rank}")
+                print(f"[DEBUG]   Computed residual SVD for Refiner {module_name}, rank={rank}, proj_down={proj_down.shape}, proj_up={proj_up.shape}")
             except Exception as e:
-                print(f"[DEBUG] Failed to compute residual SVD for {module_name}: {e}")
+                import traceback
+                print(f"[DEBUG] FAILED dynamic SVD for {module_name}: {e}")
+                traceback.print_exc()
                 branch = None
         
         smooth = _get_smooth(module_name)
